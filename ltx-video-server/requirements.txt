@@ -1,0 +1,30 @@
+# LTX-Video 微服务依赖
+# 安装前请先安装 PyTorch（按你的 CUDA 版本选择）:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#
+# 然后克隆并安装 LTX-Video:
+#   git clone https://github.com/Lightricks/LTX-Video.git
+#   cd LTX-Video
+#   pip install -e .
+#
+# 最后安装本服务的依赖:
+#   pip install -r requirements.txt
+
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+
+# LTX-Video 核心依赖（如果未通过 pip install -e . 安装，取消下方注释）
+# torch>=2.1.0
+# diffusers>=0.28.2
+# transformers>=4.47.2,<4.52.0
+# sentencepiece>=0.1.96
+# huggingface-hub~=0.30
+# einops
+# timm
+# imageio[ffmpeg]
+# av
+# torchvision
+
+# FP8 量化支持（仅 ADA 架构 GPU: RTX 40/50系、H100 等）
+# pip install git+https://github.com/Lightricks/LTXVideo-Q8-Kernels

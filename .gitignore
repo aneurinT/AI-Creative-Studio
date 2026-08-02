@@ -44,9 +44,8 @@ backend2_err.log
 backend3.log
 backend3_err.log
 
-# LTX local model
+# LTX local model (huge, don't commit)
 LTX-Video/
-ltx-video-server/
 
 # Editor directories and files
 .vscode/*
