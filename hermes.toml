@@ -1,0 +1,9 @@
+[harvest]
+sources = [ "cff",]
+
+[deposit]
+target = "invenio_rdm"
+
+[deposit.invenio_rdm]
+site_url = ""
+access_right = "open"

@@ -1,0 +1,116 @@
+{
+  "name": "ai-creative-studio",
+  "productName": "AI创意工坊",
+  "private": true,
+  "version": "1.0.0",
+  "description": "AI图片视频创意生成工具",
+  "author": "AI Creative Studio",
+  "main": "dist-electron/main.js",
+  "type": "module",
+  "scripts": {
+    "client:dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "check": "tsc --noEmit",
+    "server:dev": "nodemon",
+    "dev": "concurrently \"npm run client:dev\" \"npm run server:dev\"",
+    "electron:dev": "tsx electron/main.ts",
+    "electron:build": "tsc -p electron/tsconfig.json --outDir dist-electron && vite build",
+    "dist": "npm run electron:build && electron-builder",
+    "dist:dir": "npm run electron:build && electron-builder --dir"
+  },
+  "build": {
+    "appId": "com.aicreativestudio.app",
+    "productName": "AI创意工坊",
+    "directories": {
+      "output": "release-new"
+    },
+    "publish": "never",
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "api/dist/**/*",
+      "api/package.json",
+      "node_modules/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "api",
+        "to": "api",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": true,
+      "shortcutName": "AI创意工坊"
+    }
+  },
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@ffmpeg-installer/win32-x64": "^4.1.0",
+    "@ffprobe-installer/ffprobe": "^2.1.2",
+    "@imgly/background-removal": "^1.7.0",
+    "@types/fluent-ffmpeg": "^2.1.28",
+    "@types/multer": "^2.2.0",
+    "clsx": "^2.1.1",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.1",
+    "express": "^4.21.2",
+    "fluent-ffmpeg": "^2.1.3",
+    "hermes-agent": "^0.19.0",
+    "lucide-react": "^0.511.0",
+    "multer": "^2.2.0",
+    "node-fetch": "^3.3.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.3.0",
+    "tailwind-merge": "^3.0.2",
+    "zustand": "^5.0.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.25.0",
+    "@types/cors": "^2.8.19",
+    "@types/electron": "^1.6.12",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.15.30",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vercel/node": "^5.3.6",
+    "@vitejs/plugin-react": "^4.4.1",
+    "autoprefixer": "^10.4.21",
+    "babel-plugin-react-dev-locator": "^1.0.0",
+    "concurrently": "^10.0.4",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "eslint": "^9.25.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.19",
+    "globals": "^16.0.0",
+    "nodemon": "^3.1.10",
+    "postcss": "^8.5.3",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.20.3",
+    "typescript": "~5.8.3",
+    "typescript-eslint": "^8.30.1",
+    "vite": "^6.3.5",
+    "vite-plugin-electron": "^1.1.0",
+    "vite-plugin-electron-renderer": "^1.0.0",
+    "vite-tsconfig-paths": "^6.1.1"
+  }
+}

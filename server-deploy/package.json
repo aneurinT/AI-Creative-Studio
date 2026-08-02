@@ -1,0 +1,22 @@
+{
+  "name": "ai-creative-studio-deploy",
+  "version": "1.0.0",
+  "description": "AI Creative Studio - Server Deployment Package",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.1",
+    "node-fetch": "^3.3.2",
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@ffprobe-installer/ffprobe": "^2.1.2",
+    "@imgly/background-removal": "^1.7.0",
+    "fluent-ffmpeg": "^2.1.3",
+    "multer": "^2.2.0"
+  }
+}

@@ -1,0 +1,22 @@
+# Express 后端 Dockerfile
+FROM node:22-alpine
+
+WORKDIR /app
+
+# 安装 ffmpeg（视频拼接需要）
+RUN apk add --no-cache ffmpeg
+
+# 复制 package 文件
+COPY package.json pnpm-lock.yaml ./
+RUN npm install -g pnpm && pnpm install --prod
+
+# 复制源码
+COPY api/ ./api/
+COPY .env ./
+
+# 创建数据目录
+RUN mkdir -p api/data api/public/images api/public/uploads api/public/videos api/data/temp_videos
+
+EXPOSE 3001
+
+CMD ["node", "--import", "tsx/esm", "api/server.ts"]
