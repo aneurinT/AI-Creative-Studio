@@ -112,11 +112,15 @@ export async function checkZhipuVideoStatus(taskId: string): Promise<{
   if (!apiKey) return { success: false, status: 'failed', error: '无 API Key' };
 
   try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
     const response = await fetch(`${ZHIPU_VIDEO_RESULT_API}/${taskId}`, {
       headers: {
         'Authorization': `Bearer ${apiKey}`,
       },
+      signal: controller.signal,
     });
+    clearTimeout(timeout);
 
     const data = await response.json() as Record<string, any>;
 

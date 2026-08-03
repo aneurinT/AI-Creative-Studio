@@ -195,21 +195,51 @@ export default function AIAssistant() {
   }, [messages]);
 
   // 获取所有未完成的生成任务
-  // 过滤掉任务完成状态的消息（无论 isGenerating 标记如何）
   function getPendingTasks(): ChatMessage[] {
     return messages.filter(m => {
       if (m.actionType !== 'video' && m.actionType !== 'image') return false
       if (m.isGenerating !== true) return false
-      // 额外过滤：如果消息已经有 generatedVideo/generatedImage 或失败标记，则不算 pending
       if (m.generatedVideo || m.generatedImage) return false
       if (m.content && (
         m.content.includes('✅') ||
         m.content.includes('❌') ||
-        m.content.includes('审核 Agent 已确认')
+        m.content.includes('审核 Agent 已确认') ||
+        m.content.includes('视频生成失败') ||
+        m.content.includes('图片生成失败')
       )) return false
       return true
     })
   }
+
+  // ===== 审核 Agent 自动巡检：定期检查已完成/失败的任务并清理 =====
+  useEffect(() => {
+    const staleTasks = messages.filter(m => {
+      if (m.actionType !== 'video' && m.actionType !== 'image') return false
+      if (m.isGenerating !== true) return false
+      return m.generatedVideo || m.generatedImage || (m.content && (
+        m.content.includes('✅') ||
+        m.content.includes('❌') ||
+        m.content.includes('审核 Agent 已确认') ||
+        m.content.includes('视频生成失败') ||
+        m.content.includes('图片生成失败')
+      ))
+    })
+
+    if (staleTasks.length === 0) return
+
+    console.log(`[AutoClean] 发现 ${staleTasks.length} 个已完成但未清理的任务，审核Agent自动关闭`)
+    staleTasks.forEach(task => {
+      activeTasksRef.current.delete(task.id)
+      taskStartTimesRef.current.delete(task.id)
+    })
+
+    setMessages(prev => prev.map(m => {
+      if (staleTasks.find(t => t.id === m.id)) {
+        return { ...m, isGenerating: false }
+      }
+      return m
+    }))
+  }, [messages])
 
   // 过滤掉临时 pending 状态的消息（保存到后端时）
   function sanitizeMessagesForPersist(msgs: ChatMessage[]): ChatMessage[] {
@@ -597,11 +627,18 @@ export default function AIAssistant() {
 
   async function callStoryWriter(message: string): Promise<{ success: boolean; script?: string; thoughts?: AgentThought[]; sessionId?: string }> {
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30000);
       const response = await fetch('/api/agents/story/write', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({
+          message,
+          history: messages.slice(-10).map(m => ({ role: m.role, content: m.content })),
+        }),
+        signal: controller.signal,
       });
+      clearTimeout(timeout);
       const data = await response.json();
       return {
         success: data.success,
@@ -617,11 +654,20 @@ export default function AIAssistant() {
 
   async function callVideoAnalyzer(script: string, sessionId?: string, originalMessage?: string): Promise<{ success: boolean; result?: Record<string, any>; thoughts?: AgentThought[] }> {
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30000);
       const response = await fetch('/api/agents/video/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ script, sessionId, originalMessage }),
+        body: JSON.stringify({
+          script,
+          sessionId,
+          originalMessage,
+          history: messages.slice(-10).map(m => ({ role: m.role, content: m.content })),
+        }),
+        signal: controller.signal,
       });
+      clearTimeout(timeout);
       const data = await response.json();
       return {
         success: data.success,
@@ -636,11 +682,18 @@ export default function AIAssistant() {
 
   async function callImageAnalyzer(message: string): Promise<{ success: boolean; result?: Record<string, any>; thoughts?: AgentThought[] }> {
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 20000);
       const response = await fetch('/api/agents/image/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({
+          message,
+          history: messages.slice(-10).map(m => ({ role: m.role, content: m.content })),
+        }),
+        signal: controller.signal,
       });
+      clearTimeout(timeout);
       const data = await response.json();
       return {
         success: data.success,
@@ -1038,10 +1091,24 @@ export default function AIAssistant() {
       }
     } catch {}
 
+    // 如果后端返回了分镜脚本，显示分镜预览
+    const sceneBreakdown = params.sceneBreakdown;
+    const scenePreview = sceneBreakdown && sceneBreakdown.length > 0
+      ? `\n📋 分镜脚本（${sceneBreakdown.length} 个镜头）：\n${sceneBreakdown.map((s: any) => `  ${s.scene}. ${s.description}（${s.duration}秒）`).join('\n')}`
+      : '';
+
+    const genPhases = [
+      '📹 正在提交视频生成任务...',
+      '📹 等待 AI 引擎处理...',
+      '📹 正在渲染视频画面...',
+      '📹 正在合成视频片段...',
+    ];
+    let genPhaseIdx = 0;
+
     setMessages(prev => [...prev, {
       id: loadingId,
       role: 'assistant',
-      content: `📹 正在为你生成视频...${qualityBadge}`,
+      content: `📹 正在提交视频生成任务...${scenePreview}${qualityBadge}`,
       actionType: 'video',
       isGenerating: true,
       progress: 0,
@@ -1050,8 +1117,19 @@ export default function AIAssistant() {
       sessionId,
     }]);
 
-    const MAX_RETRIES = 3;
-    const RETRY_DELAY_MS = 5000;
+    // 实时展示生成进度阶段
+    const genTimer = setInterval(() => {
+      genPhaseIdx = (genPhaseIdx + 1) % genPhases.length;
+      setMessages(prev => prev.map(m => {
+        if (m.id === loadingId && m.isGenerating) {
+          return { ...m, content: `${genPhases[genPhaseIdx]}${scenePreview}${qualityBadge}` };
+        }
+        return m;
+      }));
+    }, 3000);
+
+    const MAX_RETRIES = 2;
+    const RETRY_DELAY_MS = 3000;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
@@ -1063,6 +1141,7 @@ export default function AIAssistant() {
             prompt: params.prompt,
             style: params.style || 'realistic',
             duration: params.duration || '10',
+            sceneBreakdown: params.sceneBreakdown || undefined, // 传递分镜数据
           }),
           signal: controller.signal,
         });
@@ -1725,6 +1804,30 @@ export default function AIAssistant() {
     setInput('');
     setIsTyping(true);
 
+    // 展示 Agent 思考状态
+    const thinkingId = `thinking-${Date.now()}`;
+    setMessages(prev => [...prev, {
+      id: thinkingId,
+      role: 'assistant',
+      content: '🤔 AI 助手正在理解你的需求...',
+      actionType: 'general',
+      isGenerating: true,
+      timestamp: Date.now(),
+    }]);
+
+    // 实时展示思考阶段变化
+    const thinkingTimer = setInterval(() => {
+      setMessages(prev => prev.map(m => {
+        if (m.id === thinkingId && m.isGenerating) {
+          const d = new Date().getSeconds() % 3;
+          const phases = ['🤔 AI 助手正在理解你的需求', '🔍 AI 助手正在分析意图', '🧠 AI 助手正在规划方案'];
+          const phase = phases[Math.floor(new Date().getSeconds() / 3) % phases.length];
+          return { ...m, content: `${phase}${'.'.repeat(d + 1)}` };
+        }
+        return m;
+      }));
+    }, 1000);
+
     // Agent 思考阶段也注册 AbortController，支持用户停止
     const agentAbortController = new AbortController();
     const agentTaskId = `agent-${userMessage.id}`;
@@ -1735,8 +1838,12 @@ export default function AIAssistant() {
       const hermesResult = hasImages
         ? await callHermesWithImage(sendText, imageUrls!, agentAbortController.signal)
         : await callHermesAgent(sendText, messages, agentAbortController.signal);
-      // Agent 思考完成，移除 controller
+      // Agent 思考完成，移除 controller 和思考动画
+      clearInterval(thinkingTimer);
       activeTasksRef.current.delete(agentTaskId);
+
+      // 移除思考消息
+      setMessages(prev => prev.filter(m => m.id !== thinkingId));
 
       let actionResult = recognizeAction(sendText);
       
@@ -1802,7 +1909,19 @@ export default function AIAssistant() {
             timestamp: Date.now(),
           }]);
 
+          // 实时展示思考动画
+          const storyThoughtTimer = setInterval(() => {
+            setMessages(prev => prev.map(m => {
+              if (m.id === loadingId && m.isGenerating) {
+                const d = new Date().getSeconds() % 3;
+                return { ...m, content: `📝 故事创作专家正在创作脚本${'.'.repeat(d + 1)}` };
+              }
+              return m;
+            }));
+          }, 800);
+
           const storyResult = await callStoryWriter(sendText);
+          clearInterval(storyThoughtTimer);
           
           // 🔍 审核 Agent：实时审核脚本质量
           let scriptReviewBadge = '';
@@ -1854,20 +1973,41 @@ export default function AIAssistant() {
               timestamp: Date.now(),
             }]);
 
+            // 实时展示思考动画
+            const analyzerThoughtTimer = setInterval(() => {
+              setMessages(prev => prev.map(m => {
+                if (m.id === analyzerLoadingId && m.isGenerating) {
+                  const d = new Date().getSeconds() % 3;
+                  return { ...m, content: `🎬 视频制作专家正在分析脚本${'.'.repeat(d + 1)}` };
+                }
+                return m;
+              }));
+            }, 800);
+
             const analyzeResult = await callVideoAnalyzer(storyResult.script, storyResult.sessionId, sendText);
+            clearInterval(analyzerThoughtTimer);
 
             if (analyzeResult.success && analyzeResult.result) {
               const allThoughts = [...(storyResult.thoughts || []), ...(analyzeResult.thoughts || [])];
-              // 用户明确指定的时长优先于分析器返回的时长，防止 Agent 降级时长
               const userDuration = extractDuration(sendText);
               const mergedResult = { ...analyzeResult.result };
               if (userDuration !== '10' || sendText.match(/\d+\s*(秒|分钟|minute|min)/)) {
                 mergedResult.duration = userDuration;
               }
-              // 脚本分析完成，分析阶段 loading 设为 false（实际生成阶段会创建新的 loading）
+
+              // 构建分析结果展示（包含分镜信息）
+              const resultPreview = mergedResult.sceneBreakdown && mergedResult.sceneBreakdown.length > 0
+                ? `🎬 视频分析完成！\n\n📋 **分镜脚本（${mergedResult.sceneBreakdown.length} 个镜头，${mergedResult.duration}秒）**：\n${mergedResult.sceneBreakdown.map((s: any) => `  ${s.scene}. ${s.description || s.prompt?.substring(0, 40)}（${s.duration}秒）`).join('\n')}\n\n🎨 风格：${mergedResult.style || 'auto'}\n📝 Prompt：${mergedResult.prompt?.substring(0, 80)}...`
+                : `🎬 视频分析完成！\n\n🎨 风格：${mergedResult.style || 'auto'}\n⏱ 时长：${mergedResult.duration || '10'}秒\n📝 Prompt：${mergedResult.prompt?.substring(0, 100)}...`;
+
               setMessages(prev => prev.map(m => {
                 if (m.id === analyzerLoadingId) {
-                  return { ...m, isGenerating: false };
+                  return {
+                    ...m,
+                    content: resultPreview,
+                    agentThoughts: allThoughts,
+                    isGenerating: false,
+                  };
                 }
                 return m;
               }));
@@ -1897,7 +2037,19 @@ export default function AIAssistant() {
             timestamp: Date.now(),
           }]);
 
+          // 实时展示思考动画
+          const imgThoughtTimer = setInterval(() => {
+            setMessages(prev => prev.map(m => {
+              if (m.id === loadingId && m.isGenerating) {
+                const d = new Date().getSeconds() % 3;
+                return { ...m, content: `🎨 图像创作专家正在分析需求${'.'.repeat(d + 1)}` };
+              }
+              return m;
+            }));
+          }, 800);
+
           const analyzeResult = await callImageAnalyzer(sendText);
+          clearInterval(imgThoughtTimer);
 
           if (analyzeResult.success && analyzeResult.result) {
             setMessages(prev => prev.map(m => {
@@ -1997,6 +2149,8 @@ export default function AIAssistant() {
         }
       }
     } catch (error) {
+      clearInterval(thinkingTimer);
+      setMessages(prev => prev.filter(m => m.id !== thinkingId));
       if ((error as Error).name === 'AbortError') return;
       console.error('处理请求异常:', error);
       setMessages(prev => [...prev, {
@@ -2006,6 +2160,8 @@ export default function AIAssistant() {
         timestamp: Date.now(),
       }]);
     } finally {
+      clearInterval(thinkingTimer);
+      setMessages(prev => prev.filter(m => m.id !== thinkingId));
       setIsTyping(false);
       // 当前任务完成，自动消费队列中的下一个消息
       processNextInQueue();

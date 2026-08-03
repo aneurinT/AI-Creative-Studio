@@ -7,119 +7,87 @@ import { reviewUserIntent, findMemoryMatch, recordMemory } from '../services/rev
 import { reviewVideoScript, reviewVideoParams, quickScoreVideoPrompt, reviewVideoFinal, analyzeFailure } from '../services/videoReviewAgent.js';
 import { retrievePromptTemplate, retrieveVisualStyle, buildRAGContext, semanticRAG, seedKnowledgeBase } from '../services/ragKnowledge.js';
 
-const execAsync = promisify(exec);
-const router = Router();
+import { CHAT_MODEL, CHAT_API, getChatApiKey, CHAT_FALLBACK_MODEL, CHAT_FALLBACK_API, getChatFallbackApiKey } from '../services/llmConfig.js';
 
 const HERMES_PYTHON_PATH = process.platform === 'win32' ? 'python' : 'python3';
 const HERMES_MODULE = 'hermes_cli.main';
 
-// DeepSeek API 配置
-const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
-const DEEPSEEK_MODEL = 'deepseek-chat'; // 或 deepseek-reasoner
-
-let hermesReady: boolean | null = null;
-
-async function checkHermesInstalled(): Promise<boolean> {
-  if (hermesReady !== null) return hermesReady;
-  try {
-    const { stdout } = await execAsync(
-      `"${HERMES_PYTHON_PATH}" -m ${HERMES_MODULE} version`,
-      { timeout: 10_000, windowsHide: true },
-    );
-    hermesReady = stdout.includes('Hermes Agent');
-    return hermesReady;
-  } catch {
-    hermesReady = false;
-    return false;
-  }
-}
+const execAsync = promisify(exec);
+const router = Router();
 
 /**
- * 调用 DeepSeek API 进行意图识别
+ * 调用 LLM 进行意图识别（智谱优先，DeepSeek 降级）
  * 返回 { action, params, response } 或 null（失败时回退）
  */
-async function callDeepSeek(message: string, history: any[]): Promise<{ action: string; params: Record<string, any>; response: string } | null> {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) return null;
+async function callLLM(message: string, history: any[]): Promise<{ action: string; params: Record<string, any>; response: string } | null> {
+  // 先尝试智谱 glm-4-flash（免费）
+  const primaryKey = getChatApiKey();
+  if (primaryKey) {
+    const result = await tryCallLLM(message, history, CHAT_API, primaryKey, CHAT_MODEL, 'Zhipu');
+    if (result) return result;
+  }
 
-  const systemPrompt = `你是 Hermes AI 创意助手，负责理解用户创作需求并精准识别意图。
+  // 智谱不可用，降级到 DeepSeek
+  const fallbackKey = getChatFallbackApiKey();
+  if (fallbackKey) {
+    console.log('[LLM] Zhipu unavailable, falling back to DeepSeek');
+    const result = await tryCallLLM(message, history, CHAT_FALLBACK_API, fallbackKey, CHAT_FALLBACK_MODEL, 'DeepSeek');
+    if (result) return result;
+  }
 
-## 核心能力
-分析用户消息，判断意图类别(action)，提取创作参数(params)，理解隐含需求。
+  console.warn('[LLM] All LLM providers unavailable');
+  return null;
+}
+
+async function tryCallLLM(
+  message: string,
+  history: any[],
+  apiUrl: string,
+  apiKey: string,
+  model: string,
+  provider: string,
+): Promise<{ action: string; params: Record<string, any>; response: string } | null> {
+  const systemPrompt = `你是 AI 创意助手，负责理解用户创作需求并精准识别意图。
 
 ## Action 类型与识别规则
 
 ### image（图片生成）
 关键词：画、生成图、制作图片、画一张、画个、插画、海报、壁纸
-隐含规则：提及"画"但没有"视频/动画/片子" → image
 params: prompt, style, size(默认1024x1024)
-style 推断：二次元/anime/动漫 → anime | 3D/blender → 3d | 写实/照片 → realistic | 电影/大片 → cinematic
 
 ### video（视频生成）  
-关键词：视频、片子、短片、动画、制作视频、生成视频、拍一个、广告片、宣传片
-时长推断：用户说"30秒"→ duration:30 | "20秒左右"→ 20 | "半小时"→ 1800 | 没说→ 默认18
-style: 广告/宣传 → cinematic | 动漫/卡通 → anime | Vlog → realistic
+关键词：视频、片子、短片、动画、制作视频、生成视频、拍一个、广告片
+时长推断：用户说"15秒"→ duration:15 | "30秒"→ 30 | "1分钟"→ 60 | 没说→ 默认10
+style: 广告/宣传 → cinematic | 动漫/卡通 → anime | 写实 → realistic
 
-### modify-image（修改图片）
-关键词：修改图片、改图、P一下、把这个图的XX改成、换背景、加滤镜、调色
-需要：originalPrompt(原图描述) + modifyInstruction(修改要求)
-
-### modify-video（修改视频）
-关键词：修改视频、视频改下、重做视频、换个风格重新生成视频
-需要：originalPrompt + modifyInstruction
-
-### remove-bg（抠图/去背景）
-关键词：抠图、去背景、去掉背景、把背景去掉、透明背景、remove background
-
-### compose（图片合成）
-关键词：合成、拼图、把A和B放在一起、换脸、融合、组合图片
-
-### general（通用问答）
-非创作任务：聊天、询问、帮助、你好、功能咨询
-未明确创作意图的也归此类
-
-## 风格推断知识库
-| 用户表述 | style |
-|----------|-------|
-| 动漫/二次元/卡通/anime/漫画 | anime |
-| 写实/真实/照片/逼真/真人 | realistic |  
-| 电影/大片/好莱坞/cinematic | cinematic |
-| 3D/三维/blender/立体 | 3d |
-| 插画/绘画/手绘 | illustration |
-| 水彩/油画/素描 | illustration |
-| 赛博朋克/未来/科幻 | cinematic |
-
-## 尺寸理解
-- "手机壁纸" → 1080x1920 | "电脑壁纸" → 1920x1080
-- "方形" → 1024x1024 | "横幅" → 1792x1024 | "竖幅" → 1024x1792
-- 未指定 → 1024x1024
+### modify-image / modify-video / remove-bg / compose / general
 
 ## 输出格式（严格JSON，不要其他文字）
-{"action":"image","params":{"prompt":"提示词","style":"风格","size":"1024x1024"},"response":"正在生成..."}
-{"action":"video","params":{"prompt":"提示词","style":"风格","duration":18},"response":"准备制作..."}
+{"action":"video","params":{"prompt":"提示词","style":"realistic","duration":10},"response":"正在生成..."}
+{"action":"image","params":{"prompt":"提示词","style":"anime","size":"1024x1024"},"response":"正在生成..."}
 {"action":"general","params":{"query":"提问"},"response":"回答"}`;
 
   try {
-    const response = await fetchWithTimeout(DEEPSEEK_API_URL, {
+    const response = await fetchWithTimeout(apiUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: DEEPSEEK_MODEL,
+        model,
         messages: [
           { role: 'system', content: systemPrompt },
           ...history.slice(-5).map((m: any) => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.content })),
           { role: 'user', content: message },
         ],
         temperature: 0.7,
-        max_tokens: 500,
+        max_tokens: 400,
       }),
-    }, 20000);
+    }, 15000); // 15 秒超时，比之前的 20 秒更快
 
     if (!response.ok) {
-      console.warn(`[DeepSeek] API failed: ${response.status}`);
+      console.warn(`[${provider}] API failed: ${response.status}`);
       return null;
     }
 
@@ -127,7 +95,6 @@ style: 广告/宣传 → cinematic | 动漫/卡通 → anime | Vlog → realisti
     const content = data.choices?.[0]?.message?.content?.trim();
     if (!content) return null;
 
-    // 解析 JSON 响应
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;
 
@@ -136,7 +103,7 @@ style: 广告/宣传 → cinematic | 动漫/卡通 → anime | Vlog → realisti
     const validActions = ['image', 'video', 'modify-image', 'modify-video', 'remove-bg', 'compose', 'general'];
     const mappedAction = validActions.find(a => action.includes(a)) || 'general';
 
-    console.log(`[DeepSeek] Intent: ${mappedAction} | ${parsed.response?.substring(0, 50)}`);
+    console.log(`[${provider}] Intent: ${mappedAction} | ${parsed.response?.substring(0, 50)}`);
 
     return {
       action: mappedAction,
@@ -144,7 +111,7 @@ style: 广告/宣传 → cinematic | 动漫/卡通 → anime | Vlog → realisti
       response: parsed.response || '我理解你的需求了，正在帮你处理...',
     };
   } catch (error) {
-    console.warn('[DeepSeek] Exception:', error);
+    console.warn(`[${provider}] Exception:`, (error as Error).message);
     return null;
   }
 }
@@ -397,12 +364,12 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
     console.log(`[RAG] 来源: ${ragResult.source}, 模板: ${ragResult.template?.description || '无'}, 风格: ${ragResult.style?.name || '无'}`);
     const ragContext = buildRAGContext(message, ragResult.template, ragResult.style);
 
-    const deepseekResult = await callDeepSeek(message, history || []);
-    if (deepseekResult) {
-      if (ragResult.template) { deepseekResult.params.prompt = (deepseekResult.params.prompt || message) + ' | ' + ragResult.template.prompt.substring(0, 150); }
-      if (ragResult.style) { deepseekResult.params.style = ragResult.style.keywords[0] === '动漫' ? 'anime' : deepseekResult.params.style; }
-      if (ragContext) { deepseekResult.params.ragContext = ragContext; }
-      res.json({ success: true, response: deepseekResult.response, action: deepseekResult.action, params: deepseekResult.params });
+    const llmResult = await callLLM(message, history || []);
+    if (llmResult) {
+      if (ragResult.template) { llmResult.params.prompt = (llmResult.params.prompt || message) + ' | ' + ragResult.template.prompt.substring(0, 150); }
+      if (ragResult.style) { llmResult.params.style = ragResult.style.keywords[0] === '动漫' ? 'anime' : llmResult.params.style; }
+      if (ragContext) { llmResult.params.ragContext = ragContext; }
+      res.json({ success: true, response: llmResult.response, action: llmResult.action, params: llmResult.params });
       return;
     }
 

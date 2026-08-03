@@ -1,4 +1,4 @@
-import { Router, type Request, type Response } from 'express';
+﻿import { Router, type Request, type Response } from 'express';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 
@@ -53,56 +53,71 @@ async function checkHermesInstalled(): Promise<boolean> {
 }
 
 /** 异步调用 Hermes Python CLI */
-async function callHermesWithContext(message: string, systemPrompt: string, sessionId: string): Promise<string> {
+async function callHermesWithContext(message: string, systemPrompt: string, sessionId: string, history?: any[]): Promise<string> {
+  // 获取上一轮 Agent 结果作为上下文
+  const context = agentContexts.get(sessionId);
+  const prevResult = context?.finalResult ? JSON.stringify(context.finalResult).substring(0, 500) : '';
+
+  // 构建带上下文的 messages
+  const contextMessages: any[] = [{ role: 'system', content: systemPrompt }];
+
+  // 添加历史对话
+  if (history && history.length > 0) {
+    const recent = history.slice(-8).map((m: any) => ({
+      role: m.role === 'user' ? 'user' : 'assistant' as const,
+      content: typeof m.content === 'string' ? m.content.substring(0, 300) : '',
+    }));
+    contextMessages.push(...recent);
+  }
+
+  // 添加上一轮 Agent 结果
+  if (prevResult) {
+    contextMessages.push({ role: 'assistant', content: `上一轮处理结果：${prevResult}` });
+  }
+
+  contextMessages.push({ role: 'user', content: `用户需求：${message}\n\n请直接输出结果，不要追问。` });
+
+  // 优先 LLM API
+  const apiKey = process.env.ZHIPU_API_KEY;
+  if (apiKey) {
+    try {
+      const response = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({ model: 'glm-4-flash', messages: contextMessages, temperature: 0.7, max_tokens: 800 }),
+        signal: AbortSignal.timeout(25000),
+      });
+      if (response.ok) {
+        const data = await response.json() as any;
+        const content = data.choices?.[0]?.message?.content?.trim();
+        if (content) return content;
+      }
+      console.warn(`[Agent] LLM API failed: ${response.status}`);
+    } catch (e) {
+      console.warn('[Agent] LLM API exception:', (e as Error).message);
+    }
+  }
+
+  // 降级：本地 Hermes
   try {
     const installed = await checkHermesInstalled();
-    if (!installed) return '';
-  } catch {
-    return '';
-  }
-
-  const env = {
-    ...process.env,
-    PYTHONIOENCODING: 'utf-8',
-    PYTHONUTF8: '1',
-    LC_ALL: 'zh_CN.UTF-8',
-    LANG: 'zh_CN.UTF-8',
-    GLM_API_KEY: process.env.GLM_API_KEY || '',
-  };
-
-  try {
-    const fullMessage = `${systemPrompt}\n\n用户需求：${message}\n\n请根据用户需求直接输出结果，不要追问。`;
-    const escapedMessage = fullMessage.replace(/"/g, '\\"');
-    const cmd = `"${HERMES_PYTHON_PATH}" -m ${HERMES_MODULE} chat -q "${escapedMessage}" -Q`;
-
-    const { stdout } = await execAsync(cmd, {
-      env,
-      timeout: HERMES_TIMEOUT,
-      maxBuffer: 1024 * 1024,
-      windowsHide: true,
-    });
-
-    const output = stdout?.trim() || '';
-    if (output) {
-      const lines = output.split('\n');
-      const responseLines = lines.filter(line => !line.startsWith('session_id:'));
-      const response = responseLines.join('\n').trim();
-
-      if (response &&
-          !response.includes('系统指令') &&
-          !response.includes('请提供') &&
-          !response.includes('请描述') &&
-          !response.includes('无法') &&
-          !response.includes('抱歉') &&
-          !response.includes('技能')) {
-        return response;
-      }
+    if (installed) {
+      const fullMessage = `${systemPrompt}\n\n${prevResult ? `上一步结果：${prevResult}\n` : ''}用户需求：${message}`;
+      const escapedMessage = fullMessage.replace(/"/g, '\\"');
+      const cmd = `"${HERMES_PYTHON_PATH}" -m ${HERMES_MODULE} chat -q "${escapedMessage}" -Q`;
+      const { stdout } = await execAsync(cmd, {
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', GLM_API_KEY: process.env.GLM_API_KEY || '' },
+        timeout: HERMES_TIMEOUT, maxBuffer: 1024 * 1024, windowsHide: true,
+      });
+      const output = stdout?.trim() || '';
+      const lines = output.split('\n').filter(l => !l.startsWith('session_id:'));
+      const response = lines.join('\n').trim();
+      if (response && !response.includes('系统指令') && !response.includes('请提供')) return response;
     }
-  } catch (err) {
-    console.error('[Hermes] Call failed:', (err as Error).message?.substring(0, 100));
-  }
+  } catch {}
 
-  return '';
+  // 最终降级：本地模板
+  return generateMockScript(message);
 }
 
 const AGENT_CONFIGS = {
@@ -148,43 +163,59 @@ const AGENT_CONFIGS = {
   videoMaker: {
     name: '视频制作专家',
     role: 'videoMaker',
-    systemPrompt: `你是一位专业的视频制作专家，擅长从脚本中精准提取AI视频生成参数。
+    systemPrompt: `你是专业的视频制作专家，从脚本中提取视频生成参数并**自动生成分镜脚本**。
+
+## 核心任务
+1. 提取 prompt、style、duration 参数
+2. **根据 duration 自动计算分镜**：每 5-6 秒一个镜头（因为免费视频模型单次最大 6 秒）
+3. 每个分镜需要有独立的英文 prompt、中文描述
 
 ## 参数提取规则
 
-### 1. prompt（核心提示词）
-- 必须用英文（视频生成API需要）
-- 包含：主体(subject) + 动作(action) + 场景(setting) + 光线(lighting) + 色调(color) + 运镜(camera)
-- 示例规范："cinematic slow motion of a couple walking hand in hand on golden beach, warm sunset light, soft focus, 0.5x speed, 4k quality"
-- 长度控制在 80-200 词
-- 避免：抽象词汇、负面词汇、品牌名称（API可能过滤）
+### 1. prompt（核心提示词，英文）
+- 包含：主体 + 动作 + 场景 + 光线 + 色调 + 运镜
+- 示例："cinematic slow motion of a couple walking on golden beach, warm sunset light, 4k"
+- 80-200 词，避免抽象/负面词汇
 
-### 2. style（视觉风格）
-| 脚本描述 | style |
-|----------|-------|
-| 电影感/广告/宣传 | cinematic |
-| 动画/卡通/二次元 | anime |
-| 写实/纪录片/真人 | realistic |
-| 3D渲染/数字 | 3d |
-| 插画/手绘/艺术 | illustration |
+### 2. duration（时长，秒）
+- 从脚本提取，默认 10 秒
+- 30秒以上自动标注为长视频
 
-### 3. duration（时长）
-重要：必须严格使用用户在原始需求中指定的时长，不得擅自缩短！
-- 时长映射：5/10/15/18/30/36/45/60/75/90秒
-- 如果用户没说，根据场景数估算：场景数 × 6秒
+### 3. sceneBreakdown（分镜脚本）
+**必须生成**，根据总时长自动分段：
 
-### 4. sceneBreakdown（场景分解）
-- 长场景(>18s)自动拆分：按叙事节点拆，每段最多18s
-- 每段保持独立可理解
+| 总时长 | 分镜数 | 每段时长 |
+|--------|--------|----------|
+| ≤10秒 | 1-2 个 | 5秒 |
+| 10-30秒 | 3-5 个 | 5-6秒 |
+| 30秒+ | 5+ 个 | 5-6秒 |
 
-## 输出格式（JSON）
+每个分镜格式：
+{"scene":1,"description":"开场：猫咪在阳光下的草地上伸懒腰","prompt":"a cute orange cat stretching on sunny grass, golden morning light, close-up shot, 4k","duration":5,"camera":"close-up","transition":"fade in"}
+
+## 输出 JSON
 {
-  "prompt": "英文视频提示词",
-  "style": "cinematic/anime/realistic/3d/illustration",
-  "duration": "秒数",
-  "sceneBreakdown": ["场景1prompt", "场景2prompt"],
-  "analysis": "参数选择理由"
-}`,
+  "prompt":"主提示词（英文）",
+  "style":"realistic|anime|cinematic",
+  "duration":10,
+  "sceneBreakdown":[
+    {"scene":1,"description":"...","prompt":"...","duration":5,"camera":"wide","transition":"cut"},
+    {"scene":2,"description":"...","prompt":"...","duration":5,"camera":"close-up","transition":"fade"}
+  ]
+}
+
+## 补充规则
+### style（视觉风格）
+电影感/广告 → cinematic | 动画/卡通 → anime | 写实/真人 → realistic | 3D → 3d | 插画 → illustration
+
+### duration
+必须使用用户指定时长，未指定默认10秒
+
+### 分镜自动计算
+sceneBreakdown 数组，每段5-6秒，数量 = Math.ceil(总时长/6)
+
+## 输出 JSON
+{"prompt":"...","style":"...","duration":10,"sceneBreakdown":[{"scene":1,"description":"...","prompt":"...","duration":5,"camera":"wide","transition":"cut"}]}`,
   },
   imageCreator: {
     name: '图像创作专家',
@@ -289,7 +320,7 @@ router.get('/context/:sessionId/thoughts', (req: Request, res: Response) => {
 
 router.post('/story/write', async (req: Request, res: Response) => {
   try {
-    const { message, sessionId: existingSessionId } = req.body;
+    const { message, sessionId: existingSessionId, history } = req.body;
     
     const sessionId = existingSessionId || generateSessionId();
     const config = AGENT_CONFIGS.storyWriter;
@@ -319,7 +350,7 @@ router.post('/story/write', async (req: Request, res: Response) => {
       timestamp: Date.now(),
     });
 
-    const hermesResponse = await callHermesWithContext(message, config.systemPrompt, sessionId);
+    const hermesResponse = await callHermesWithContext(message, config.systemPrompt, sessionId, history);
     
     let script = '';
     if (hermesResponse) {
@@ -361,7 +392,7 @@ router.post('/story/write', async (req: Request, res: Response) => {
 
 router.post('/video/analyze', async (req: Request, res: Response) => {
   try {
-    const { script, sessionId: existingSessionId, originalMessage } = req.body;
+    const { script, sessionId: existingSessionId, originalMessage, history } = req.body;
     
     const sessionId = existingSessionId || generateSessionId();
     const config = AGENT_CONFIGS.videoMaker;
@@ -391,7 +422,7 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
       timestamp: Date.now(),
     });
 
-    const hermesResponse = await callHermesWithContext(script, config.systemPrompt, sessionId);
+    const hermesResponse = await callHermesWithContext(script, config.systemPrompt, sessionId, history);
     
     let analysis = {};
     if (hermesResponse) {
@@ -442,7 +473,7 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
 
 router.post('/image/analyze', async (req: Request, res: Response) => {
   try {
-    const { message, sessionId: existingSessionId } = req.body;
+    const { message, sessionId: existingSessionId, history } = req.body;
     
     const sessionId = existingSessionId || generateSessionId();
     const config = AGENT_CONFIGS.imageCreator;
@@ -472,7 +503,7 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
       timestamp: Date.now(),
     });
 
-    const hermesResponse = await callHermesWithContext(message, config.systemPrompt, sessionId);
+    const hermesResponse = await callHermesWithContext(message, config.systemPrompt, sessionId, history);
     
     let analysis = {};
     if (hermesResponse) {
@@ -523,7 +554,7 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
 
 router.post('/video/generate', async (req: Request, res: Response) => {
   try {
-    const { sessionId, script, originalMessage } = req.body;
+    const { sessionId, script, originalMessage, history } = req.body;
     
     const config = AGENT_CONFIGS.videoMaker;
     const existingContext = agentContexts.get(sessionId || '');
@@ -551,7 +582,7 @@ router.post('/video/generate', async (req: Request, res: Response) => {
       timestamp: Date.now(),
     });
 
-    const hermesResponse = await callHermesWithContext(script, config.systemPrompt, sessionId);
+    const hermesResponse = await callHermesWithContext(script, config.systemPrompt, sessionId, history);
     
     let analysis = {};
     if (hermesResponse) {
