@@ -1,6 +1,7 @@
 ﻿import { Router, type Request, type Response } from 'express';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { REASONING_MODEL, REASONING_API, getReasoningApiKey, REASONING_FALLBACK_MODEL, REASONING_FALLBACK_API, getReasoningFallbackApiKey } from '../services/llmConfig.js';
 
 const execAsync = promisify(exec);
 const router = Router();
@@ -24,8 +25,21 @@ interface AgentContext {
   userInput: string;
   thoughts: AgentThought[];
   finalResult?: Record<string, any>;
+  /** 历史任务记录（保留所有任务，不会被覆盖） */
+  taskHistory: TaskRecord[];
   createdAt: number;
   updatedAt: number;
+}
+
+interface TaskRecord {
+  /** 任务类型：storyWriter | videoAnalyzer | imageCreator */
+  agentRole: string;
+  /** 任务描述摘要 */
+  summary: string;
+  /** 任务结果的关键信息 */
+  keyInfo: Record<string, any>;
+  /** 时间戳 */
+  timestamp: number;
 }
 
 const agentContexts: Map<string, AgentContext> = new Map();
@@ -34,6 +48,42 @@ let hermesReady: boolean | null = null;
 
 function generateSessionId(): string {
   return `session_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+}
+
+/**
+ * 构建历史任务摘要，供 Agent 进行上下文关联分析
+ */
+function buildTaskHistorySummary(context: AgentContext | undefined): string {
+  if (!context || context.taskHistory.length === 0) return '';
+
+  const recentTasks = context.taskHistory.slice(-5); // 最近 5 个任务
+  const summaries = recentTasks.map((task, i) => {
+    const idx = context.taskHistory.length - recentTasks.length + i + 1;
+    return `[任务${idx}] ${task.agentRole}: ${task.summary}`;
+  });
+
+  return `📋 **历史任务记录（共 ${context.taskHistory.length} 个任务）：**\n${summaries.join('\n')}\n\n请检查当前请求是否与上述历史任务有关联。`;
+}
+
+/**
+ * 记录任务到 agentContexts 的历史中
+ */
+function recordTask(sessionId: string, agentRole: string, summary: string, keyInfo: Record<string, any>) {
+  const context = agentContexts.get(sessionId);
+  if (!context) return;
+
+  context.taskHistory.push({
+    agentRole,
+    summary,
+    keyInfo,
+    timestamp: Date.now(),
+  });
+
+  // 限制最多保留 20 条
+  if (context.taskHistory.length > 20) {
+    context.taskHistory = context.taskHistory.slice(-20);
+  }
+  context.updatedAt = Date.now();
 }
 
 /** 异步检查 Hermes 是否可用（缓存结果 5 分钟） */
@@ -52,11 +102,90 @@ async function checkHermesInstalled(): Promise<boolean> {
   }
 }
 
+/** 使用推理模型进行专家级深度分析（DeepSeek-R1 / GLM-Z1） */
+async function callReasoningAgent(message: string, systemPrompt: string, sessionId: string, history?: any[]): Promise<{ content: string; reasoning: string } | null> {
+  // 获取 Agent 上下文（含历史任务记录）
+  const context = agentContexts.get(sessionId);
+  const prevResult = context?.finalResult ? JSON.stringify(context.finalResult).substring(0, 800) : '';
+  
+  // 构建历史任务摘要
+  const taskHistorySummary = buildTaskHistorySummary(context);
+
+  const contextMessages: any[] = [{ role: 'system', content: systemPrompt }];
+  if (history && history.length > 0) {
+    const recent = history.slice(-10).map((m: any) => ({
+      role: m.role === 'user' ? 'user' : 'assistant' as const,
+      content: typeof m.content === 'string' ? m.content.substring(0, 500) : '',
+    }));
+    contextMessages.push(...recent);
+  }
+  if (taskHistorySummary) {
+    contextMessages.push({ role: 'assistant', content: taskHistorySummary });
+  }
+  if (prevResult) {
+    contextMessages.push({ role: 'assistant', content: `上一轮处理结果：${prevResult}` });
+  }
+  contextMessages.push({ role: 'user', content: `用户需求：${message}\n\n请深度理解这个任务的真正意图，不要被表面文字限制。结合上下文关联分析，自由拆解任务，给出你最专业的分析和输出。` });
+
+  // 尝试 DeepSeek-R1
+  const r1Key = getReasoningApiKey();
+  if (r1Key) {
+    try {
+      const response = await fetch(REASONING_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${r1Key}` },
+        body: JSON.stringify({ model: REASONING_MODEL, messages: contextMessages, temperature: 0.7, max_tokens: 4000 }),
+        signal: AbortSignal.timeout(90000),
+      });
+      if (response.ok) {
+        const data = await response.json() as any;
+        const msg = data.choices?.[0]?.message;
+        const reasoning = msg?.reasoning_content || '';
+        const content = msg?.content?.trim();
+        if (content) {
+          console.log(`[ReasoningAgent] DeepSeek-R1 analysis: ${reasoning.substring(0, 150)}...`);
+          return { content, reasoning };
+        }
+      }
+    } catch (e) {
+      console.warn('[ReasoningAgent] DeepSeek-R1 failed:', (e as Error).message);
+    }
+  }
+
+  // 降级到 GLM-Z1
+  const z1Key = getReasoningFallbackApiKey();
+  if (z1Key) {
+    try {
+      const response = await fetch(REASONING_FALLBACK_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${z1Key}` },
+        body: JSON.stringify({ model: REASONING_FALLBACK_MODEL, messages: contextMessages, temperature: 0.6, max_tokens: 3000 }),
+        signal: AbortSignal.timeout(60000),
+      });
+      if (response.ok) {
+        const data = await response.json() as any;
+        const msg = data.choices?.[0]?.message;
+        const reasoning = msg?.reasoning_content || '';
+        const content = msg?.content?.trim();
+        if (content) {
+          console.log(`[ReasoningAgent] GLM-Z1 analysis: ${reasoning.substring(0, 150)}...`);
+          return { content, reasoning };
+        }
+      }
+    } catch (e) {
+      console.warn('[ReasoningAgent] GLM-Z1 failed:', (e as Error).message);
+    }
+  }
+
+  return null;
+}
+
 /** 异步调用 Hermes Python CLI */
 async function callHermesWithContext(message: string, systemPrompt: string, sessionId: string, history?: any[]): Promise<string> {
-  // 获取上一轮 Agent 结果作为上下文
+  // 获取 Agent 上下文（含历史任务记录）
   const context = agentContexts.get(sessionId);
   const prevResult = context?.finalResult ? JSON.stringify(context.finalResult).substring(0, 500) : '';
+  const taskHistorySummary = buildTaskHistorySummary(context);
 
   // 构建带上下文的 messages
   const contextMessages: any[] = [{ role: 'system', content: systemPrompt }];
@@ -70,12 +199,17 @@ async function callHermesWithContext(message: string, systemPrompt: string, sess
     contextMessages.push(...recent);
   }
 
+  // 添加历史任务记录
+  if (taskHistorySummary) {
+    contextMessages.push({ role: 'assistant', content: taskHistorySummary });
+  }
+
   // 添加上一轮 Agent 结果
   if (prevResult) {
     contextMessages.push({ role: 'assistant', content: `上一轮处理结果：${prevResult}` });
   }
 
-  contextMessages.push({ role: 'user', content: `用户需求：${message}\n\n请直接输出结果，不要追问。` });
+  contextMessages.push({ role: 'user', content: `用户需求：${message}\n\n请深度理解任务本质，自由拆解分析，输出你的专业方案。不要被预设格式限制，以最能表达你创意的方式输出。` });
 
   // 优先 LLM API
   const apiKey = process.env.ZHIPU_API_KEY;
@@ -84,8 +218,8 @@ async function callHermesWithContext(message: string, systemPrompt: string, sess
       const response = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify({ model: 'glm-4-flash', messages: contextMessages, temperature: 0.7, max_tokens: 800 }),
-        signal: AbortSignal.timeout(25000),
+        body: JSON.stringify({ model: 'glm-4-flash', messages: contextMessages, temperature: 0.8, max_tokens: 2000 }),
+        signal: AbortSignal.timeout(35000),
       });
       if (response.ok) {
         const data = await response.json() as any;
@@ -124,152 +258,107 @@ const AGENT_CONFIGS = {
   storyWriter: {
     name: '故事创作专家',
     role: 'storyWriter',
-    systemPrompt: `你是一位专业的视频脚本创作家，擅长为商业广告、品牌宣传、创意短片撰写高质量脚本。
+    systemPrompt: `你是一位顶级的创意导演和故事创作大师。你的任务没有预设边界——根据用户的真实需求，自由发挥你的创造力。
 
-## 核心能力
-- 理解用户品牌/产品核心诉求
-- 将抽象需求转化为可视化场景
-- 控制节奏：吸引 → 铺垫 → 高潮 → 收尾
-- 适配不同平台（广告/宣传/社媒）
+## 工作方式
+你不是一个填模板的机器。你需要像真正的创意人一样思考：
 
-## 脚本结构
-1. **故事梗概**（2-3句，一句话说清）
-2. **场景分镜**（3-5个场景，每场景含：画面描述 + 运镜 + 光线 + 色调 + 时长）
-3. **视觉风格建议**（参照电影/品牌风格库）
+### 第一步：深度理解
+- 用户到底想要什么？背后的情感是什么？
+- 这个需求属于什么类型？（广告/宣传/艺术短片/Vlog/纪录片/动画/MV/教程/...）
+- 目标受众是谁？平台是什么？（抖音/YouTube/TV/发布会/...）
+- 如果有上下文关联，之前做了什么？如何延续或突破？
 
-## 风格库
-| 类型 | 视觉特征 | 适用场景 |
-|------|---------|---------|
-| 奢侈品广告 | 暗金/黑白色调，慢镜头，物品特写，留白构图 | 化妆品/珠宝/高端产品 |
-| 科技产品 | 蓝白灰调，快速切换，粒子特效，未来感 | 手机/软件/数码 |
-| 生活品牌 | 暖色调，手持镜头，自然光，真实场景 | 食品/家居/日用品 |
-| 运动健身 | 高对比度，快速剪辑，汗水/运动特写 | 运动鞋/健身器材 |
-| 旅行/户外 | 广角大场景，饱和色彩，航拍视角 | 旅游/汽车/户外 |
+### 第二步：自主拆解
+根据你对需求的理解，自主决定创作方案：
+- 需要几个场景？每个场景多少秒？你来决定
+- 需要什么样的叙事结构？（线性/倒叙/平行/环形/...）你来决定
+- 用什么视觉语言？（写实/超现实/极简/复古/...）你来决定
+- 节奏如何控制？（快剪/长镜头/慢动作/...）你来决定
 
-## 创作原则
-- "展示，不要讲述" — 用画面传达信息，不依赖文字
-- 每个场景有明确视觉焦点（主角/产品/关键动作）
-- 场景间过渡自然：匹配剪切(match cut)、运动方向一致、色调渐进
-- 音乐和节奏引导：快节奏→短场景(2-3s)，慢节奏→长场景(5-8s)
-- 品牌标识在开头/结尾自然出现，切忌突兀
+### 第三步：自由输出
+根据你的分析，输出最合适的脚本格式。不限制你输出什么结构——可以是：
+- 传统分镜脚本
+- 故事板描述
+- 情绪板 + 关键帧描述
+- 诗意化的叙事文本
+- 任何你认为能最好表达创意的形式
 
-## 输出格式
-- **故事梗概**：一句话概括
-- **视觉风格**：参照上述风格库
-- **场景1**：画面描述 | 运镜 | 光线 | 色调 | 约X秒
-- **场景2**：...（3-5个场景）
-- **品牌落版**：logo呈现方式`,
+**唯一要求**：每个场景/段落必须包含足够的视觉信息，让视频制作专家能够据此生成视频。
+
+记住：你是一个有独立审美的创作者，不是模板填充器。`,
   },
   videoMaker: {
     name: '视频制作专家',
     role: 'videoMaker',
-    systemPrompt: `你是专业的视频制作专家，从脚本中提取视频生成参数并**自动生成分镜脚本**。
+    systemPrompt: `你是顶级的视频制作人和技术导演。你的任务是理解故事创作专家的脚本，将其转化为可执行的视频生成方案。
 
-## 核心任务
-1. 提取 prompt、style、duration 参数
-2. **根据 duration 自动计算分镜**：每 5-6 秒一个镜头（因为免费视频模型单次最大 6 秒）
-3. 每个分镜需要有独立的英文 prompt、中文描述
+## 工作方式
+你不是参数提取器。你需要像一个真正的制作人一样分析：
 
-## 参数提取规则
+### 第一步：深度解读脚本
+- 脚本的核心视觉主题是什么？情感基调是什么？
+- 每个场景最关键的视觉元素是什么？（主体、光线、运镜、色调、氛围）
+- 脚本的节奏如何？哪里该快、哪里该慢？
+- 如果有上下文关联，之前的视频参数是什么？需要保持一致还是突破？
 
-### 1. prompt（核心提示词，英文）
-- 包含：主体 + 动作 + 场景 + 光线 + 色调 + 运镜
-- 示例："cinematic slow motion of a couple walking on golden beach, warm sunset light, 4k"
-- 80-200 词，避免抽象/负面词汇
+### 第二步：自主拆解
+根据脚本内容和你的理解，自主决定：
+- 总共需要几个分镜？每个分镜多长时间？你来决定（参考：单镜头建议 5-8 秒，但你可根据内容自由调整）
+- 每个分镜的英文 prompt 怎么写？你来创作（必须包含：主体+动作+场景+光线+运镜+画质关键词）
+- 整体视觉风格是什么？你来判断（cinematic/anime/realistic/3d/illustration/...）
+- 分镜之间如何过渡？（cut/fade/dissolve/wipe/...）你来设计
+- 总时长？从脚本或用户需求中提取
 
-### 2. duration（时长，秒）
-- 从脚本提取，默认 10 秒
-- 30秒以上自动标注为长视频
-
-### 3. sceneBreakdown（分镜脚本）
-**必须生成**，根据总时长自动分段：
-
-| 总时长 | 分镜数 | 每段时长 |
-|--------|--------|----------|
-| ≤10秒 | 1-2 个 | 5秒 |
-| 10-30秒 | 3-5 个 | 5-6秒 |
-| 30秒+ | 5+ 个 | 5-6秒 |
-
-每个分镜格式：
-{"scene":1,"description":"开场：猫咪在阳光下的草地上伸懒腰","prompt":"a cute orange cat stretching on sunny grass, golden morning light, close-up shot, 4k","duration":5,"camera":"close-up","transition":"fade in"}
-
-## 输出 JSON
+### 第三步：结构化输出
+输出 JSON 格式，但内容由你决定：
 {
-  "prompt":"主提示词（英文）",
-  "style":"realistic|anime|cinematic",
-  "duration":10,
-  "sceneBreakdown":[
-    {"scene":1,"description":"...","prompt":"...","duration":5,"camera":"wide","transition":"cut"},
-    {"scene":2,"description":"...","prompt":"...","duration":5,"camera":"close-up","transition":"fade"}
+  "prompt": "主提示词（英文，80-200词）",
+  "style": "你判断的风格",
+  "duration": 总时长数字,
+  "sceneBreakdown": [
+    {
+      "scene": 序号,
+      "description": "这个镜头的中文描述",
+      "prompt": "这个镜头的英文生成prompt",
+      "duration": 时长数字,
+      "camera": "运镜方式",
+      "transition": "过渡方式"
+    }
   ]
 }
 
-## 补充规则
-### style（视觉风格）
-电影感/广告 → cinematic | 动画/卡通 → anime | 写实/真人 → realistic | 3D → 3d | 插画 → illustration
-
-### duration
-必须使用用户指定时长，未指定默认10秒
-
-### 分镜自动计算
-sceneBreakdown 数组，每段5-6秒，数量 = Math.ceil(总时长/6)
-
-## 输出 JSON
-{"prompt":"...","style":"...","duration":10,"sceneBreakdown":[{"scene":1,"description":"...","prompt":"...","duration":5,"camera":"wide","transition":"cut"}]}`,
+你是有独立判断力的视频制作专家，不是参数填充机器。`,
   },
   imageCreator: {
     name: '图像创作专家',
     role: 'imageCreator',
-    systemPrompt: `你是一位专业的图像创作专家，擅长将需求转化为高质量AI图像prompt。
+    systemPrompt: `你是一位世界级的视觉艺术家和图像创作大师。你的任务是根据用户需求，创作出令人惊叹的视觉作品。
 
-## 核心知识库
+## 工作方式
+你是有独立审美和创作自由的艺术家：
 
-### 1. 构图法则
-| 构图 | 适用场景 |
-|------|---------|
-| 三分法(rule of thirds) | 风景/人像/通用 |
-| 居中对称(symmetrical) | 产品/建筑/仪式感 |
-| 对角线(diagonal) | 动态/运动/时尚 |
-| 框架(frame within frame) | 故事感/窥视视角 |
-| 俯瞰(top-down/flat lay) | 美食/桌面/产品排列 |
-| 仰视(low angle) | 英雄视角/建筑/权威感 |
+### 第一步：深度理解
+- 用户想要表达什么？情感核心是什么？
+- 这是什么类型的图像？（摄影/插画/海报/壁纸/概念艺术/产品图/...）
+- 目标用途是什么？（社交分享/商业海报/艺术创作/头像/...）
+- 如果有上下文关联，之前创作了什么？如何延续或演化？
 
-### 2. 光影魔法
-| 光效 | 描述关键词 | 氛围 |
-|------|-----------|------|
-| 黄金时刻 | golden hour, warm sunlight | 浪漫/温暖 |
-| 蓝调时刻 | blue hour, twilight | 宁静/神秘 |
-| 柔光 | soft diffused light, cloudy | 温柔/清新 |
-| 霓虹 | neon lights, cyberpunk | 科幻/都市 |
-| 逆光 | backlit, rim lighting | 戏剧/梦幻 |
-| 影棚 | studio lighting, three-point | 商业/专业 |
-| Rembrandt | Rembrandt lighting, dramatic | 艺术/人物 |
+### 第二步：自由创作
+根据你的艺术判断，自主决定：
+- **构图**：三分法、居中、对角线、引导线、框架构图...你来选
+- **光影**：黄金时刻、阴天柔和光、霓虹灯光、Rembrandt光...你来定
+- **色调**：暖色调、冷色调、黑白、高饱和、莫兰迪色...你来配
+- **风格**：写实摄影/二次元/赛博朋克/油画/水彩/极简/波普...你来创
+- **尺寸**：根据用途判断（头像1:1/海报3:4/壁纸16:9/...）
 
-### 3. 色彩搭配
-| 配色 | 关键词 | 情绪 |
-|------|--------|------|
-| 莫兰迪 | muted tones, desaturated | 高级/冷淡 |
-| 马卡龙 | pastel, soft colors | 甜美/少女 |
-| 冷暖对比 | teal and orange | 电影感 |
-| 黑白 | black and white, monochrome | 经典/高级 |
-| 高饱和 | vibrant, saturated | 活力/热带 |
+### 第三步：创作 prompt
+将你的艺术构想转化为高质量英文 prompt，格式自由：
+- 可以是一段完整的英文描述
+- 也可以是分段的专业摄影/绘画 prompt
+- 包含：主体描述 + 场景 + 光线 + 色调 + 构图 + 风格 + 画质关键词
 
-### 4. 风格选择决策树
-用户提到"动漫/二次元" → anime
-用户提到"照片/真实" → realistic
-用户提到"电影/大片" → cinematic  
-用户提到"3D/blender" → 3d
-用户提到"插画/手绘" → illustration
-用户提到"产品/商品" → 3d with studio lighting
-用户提到"时尚/穿搭" → realistic with fashion photography
-
-## 输出格式（JSON）
-{
-  "prompt": "英文图片提示词(80-200词)，包含：主体+构图+光线+色调+风格+画质",
-  "style": "cinematic/anime/realistic/3d/illustration",
-  "composition": "构图建议（如rule of thirds, symmetrical）",
-  "analysis": "创作思路解释"
-}`,
+你是一个真正的创作者，不是 prompt 生成器。让你的艺术判断力主导创作。`,
   },
 };
 
@@ -330,6 +419,7 @@ router.post('/story/write', async (req: Request, res: Response) => {
       sessionId,
       userInput: message,
       thoughts: [],
+      taskHistory: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -338,7 +428,7 @@ router.post('/story/write', async (req: Request, res: Response) => {
       agentName: config.name,
       role: config.role,
       step: 1,
-      thought: '开始分析用户需求，理解核心诉求和情感表达',
+      thought: '🔗 第一步：检查上下文关联，分析是否与历史任务有关...',
       timestamp: Date.now(),
     });
 
@@ -346,11 +436,22 @@ router.post('/story/write', async (req: Request, res: Response) => {
       agentName: config.name,
       role: config.role,
       step: 2,
-      thought: '正在创作视频脚本，构建故事情节和场景',
+      thought: '🧠 推理模型正在深度分析需求，构建故事情节和场景...',
       timestamp: Date.now(),
     });
 
-    const hermesResponse = await callHermesWithContext(message, config.systemPrompt, sessionId, history);
+    // 优先使用推理模型进行深度分析
+    const reasoningResult = await callReasoningAgent(message, config.systemPrompt, sessionId, history);
+    let hermesResponse = '';
+    let reasoningTrace = '';
+
+    if (reasoningResult) {
+      hermesResponse = reasoningResult.content;
+      reasoningTrace = reasoningResult.reasoning;
+    } else {
+      // 降级到指令模型
+      hermesResponse = await callHermesWithContext(message, config.systemPrompt, sessionId, history);
+    }
     
     let script = '';
     if (hermesResponse) {
@@ -371,6 +472,8 @@ router.post('/story/write', async (req: Request, res: Response) => {
 
     context.finalResult = { script };
     context.updatedAt = Date.now();
+    // 记录到任务历史
+    recordTask(sessionId, config.role, `视频脚本创作：${script.substring(0, 80)}...`, { script: script.substring(0, 200) });
     agentContexts.set(sessionId, context);
 
     res.json({
@@ -380,6 +483,8 @@ router.post('/story/write', async (req: Request, res: Response) => {
       role: config.role,
       result: { script },
       thoughts: context.thoughts,
+      reasoning: reasoningTrace?.substring(0, 500),
+      modelUsed: reasoningResult ? 'reasoning' : 'instruction',
     });
   } catch (error) {
     console.error('Story writer error:', error);
@@ -402,6 +507,7 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
       sessionId,
       userInput: originalMessage || script,
       thoughts: [],
+      taskHistory: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -410,7 +516,7 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
       agentName: config.name,
       role: config.role,
       step: 1,
-      thought: '开始分析脚本内容，提取关键元素',
+      thought: '🔗 第一步：检查上下文关联，分析是否与历史任务有关...',
       timestamp: Date.now(),
     });
 
@@ -418,11 +524,21 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
       agentName: config.name,
       role: config.role,
       step: 2,
-      thought: '正在提取视频生成参数：主题、风格、时长',
+      thought: '🧠 推理模型正在深度分析视频参数：主题、风格、时长、分镜...',
       timestamp: Date.now(),
     });
 
-    const hermesResponse = await callHermesWithContext(script, config.systemPrompt, sessionId, history);
+    // 优先使用推理模型
+    const reasoningResult = await callReasoningAgent(script, config.systemPrompt, sessionId, history);
+    let hermesResponse = '';
+    let reasoningTrace = '';
+
+    if (reasoningResult) {
+      hermesResponse = reasoningResult.content;
+      reasoningTrace = reasoningResult.reasoning;
+    } else {
+      hermesResponse = await callHermesWithContext(script, config.systemPrompt, sessionId, history);
+    }
     
     let analysis = {};
     if (hermesResponse) {
@@ -452,6 +568,7 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
 
     context.finalResult = analysis;
     context.updatedAt = Date.now();
+    recordTask(sessionId, config.role, `${config.name}完成分析`, { action: 'analyzed' });
     agentContexts.set(sessionId, context);
 
     res.json({
@@ -461,6 +578,8 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
       role: config.role,
       result: analysis,
       thoughts: context.thoughts,
+      reasoning: reasoningTrace?.substring(0, 500),
+      modelUsed: reasoningResult ? 'reasoning' : 'instruction',
     });
   } catch (error) {
     console.error('Video analyzer error:', error);
@@ -483,6 +602,7 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
       sessionId,
       userInput: message,
       thoughts: [],
+      taskHistory: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -491,7 +611,7 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
       agentName: config.name,
       role: config.role,
       step: 1,
-      thought: '开始分析用户需求，理解图像创作要求',
+      thought: '🔗 第一步：检查上下文关联，分析是否与历史任务有关...',
       timestamp: Date.now(),
     });
 
@@ -499,11 +619,21 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
       agentName: config.name,
       role: config.role,
       step: 2,
-      thought: '正在生成图像描述和风格建议',
+      thought: '🧠 推理模型正在深度分析图像创作需求：构图、光影、色彩...',
       timestamp: Date.now(),
     });
 
-    const hermesResponse = await callHermesWithContext(message, config.systemPrompt, sessionId, history);
+    // 优先使用推理模型
+    const reasoningResult = await callReasoningAgent(message, config.systemPrompt, sessionId, history);
+    let hermesResponse = '';
+    let reasoningTrace = '';
+
+    if (reasoningResult) {
+      hermesResponse = reasoningResult.content;
+      reasoningTrace = reasoningResult.reasoning;
+    } else {
+      hermesResponse = await callHermesWithContext(message, config.systemPrompt, sessionId, history);
+    }
     
     let analysis = {};
     if (hermesResponse) {
@@ -533,6 +663,7 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
 
     context.finalResult = analysis;
     context.updatedAt = Date.now();
+    recordTask(sessionId, config.role, `${config.name}完成分析`, { action: 'analyzed' });
     agentContexts.set(sessionId, context);
 
     res.json({
@@ -542,6 +673,8 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
       role: config.role,
       result: analysis,
       thoughts: context.thoughts,
+      reasoning: reasoningTrace?.substring(0, 500),
+      modelUsed: reasoningResult ? 'reasoning' : 'instruction',
     });
   } catch (error) {
     console.error('Image analyzer error:', error);
@@ -562,6 +695,7 @@ router.post('/video/generate', async (req: Request, res: Response) => {
       sessionId: sessionId || generateSessionId(),
       userInput: originalMessage || script,
       thoughts: [],
+      taskHistory: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -570,7 +704,7 @@ router.post('/video/generate', async (req: Request, res: Response) => {
       agentName: config.name,
       role: config.role,
       step: 1,
-      thought: '开始分析脚本内容，提取关键元素',
+      thought: '🔗 第一步：检查上下文关联，分析是否与历史任务有关...',
       timestamp: Date.now(),
     });
 
@@ -578,11 +712,21 @@ router.post('/video/generate', async (req: Request, res: Response) => {
       agentName: config.name,
       role: config.role,
       step: 2,
-      thought: '正在提取视频生成参数：主题、风格、时长',
+      thought: '🧠 推理模型正在深度分析视频参数：主题、风格、时长、分镜...',
       timestamp: Date.now(),
     });
 
-    const hermesResponse = await callHermesWithContext(script, config.systemPrompt, sessionId, history);
+    // 优先使用推理模型
+    const reasoningResult = await callReasoningAgent(script, config.systemPrompt, sessionId, history);
+    let hermesResponse = '';
+    let reasoningTrace = '';
+
+    if (reasoningResult) {
+      hermesResponse = reasoningResult.content;
+      reasoningTrace = reasoningResult.reasoning;
+    } else {
+      hermesResponse = await callHermesWithContext(script, config.systemPrompt, sessionId, history);
+    }
     
     let analysis = {};
     if (hermesResponse) {
@@ -612,6 +756,7 @@ router.post('/video/generate', async (req: Request, res: Response) => {
 
     context.finalResult = analysis;
     context.updatedAt = Date.now();
+    recordTask(sessionId, config.role, `${config.name}完成分析`, { action: 'analyzed' });
     agentContexts.set(sessionId, context);
 
     res.json({
@@ -621,6 +766,8 @@ router.post('/video/generate', async (req: Request, res: Response) => {
       role: config.role,
       result: analysis,
       thoughts: context.thoughts,
+      reasoning: reasoningTrace?.substring(0, 500),
+      modelUsed: reasoningResult ? 'reasoning' : 'instruction',
     });
   } catch (error) {
     console.error('Video generation error:', error);
@@ -632,201 +779,68 @@ router.post('/video/generate', async (req: Request, res: Response) => {
 });
 
 function generateMockScript(message: string): string {
-  console.log(`[Mock Script] Message: "${message}"`);
-  console.log(`[Mock Script] Has dinosaur: ${message.includes('恐龙')}`);
-  console.log(`[Mock Script] Has cat: ${message.includes('猫')}`);
-  console.log(`[Mock Script] Has forest: ${message.includes('森林')}`);
+  console.log(`[Mock Script] 降级使用本地模板，用户需求: "${message.substring(0, 80)}"`);
   
-  const hasDinosaur = message.includes('恐龙');
-  const hasCat = message.includes('猫') || message.includes('cat');
-  const hasForest = message.includes('森林') || message.includes('forest');
-  
-  if (hasDinosaur) {
-    return `故事梗概：一只可爱的小恐龙在神秘的森林中迷路了，它踏上了寻找妈妈的冒险之旅。
+  // 降级模板仅作为最后兜底，不再预设具体内容
+  // 让 Agent 在前面的 LLM 调用中自由发挥
+  return `【故事创作专家 - 离线降级模式】
 
-场景描述：
-1. 阳光透过树叶洒在翠绿的草地上，一只毛茸茸的小恐龙从蛋中孵化出来，好奇地打量着周围的世界。
-2. 小恐龙在森林中漫步，遇到了友善的小兔子和小鸟，它们帮助小恐龙寻找回家的路。
-3. 夜幕降临，小恐龙在月光下感到孤独，但它鼓起勇气继续前行。
-4. 终于，小恐龙听到了妈妈的呼唤，它朝着声音的方向跑去，与妈妈重逢。
+由于所有 AI 模型当前不可用，无法进行深度创作分析。以下是基于用户需求的简要脚本框架：
 
-角色设定：
-- 小恐龙：可爱、勇敢、充满好奇心
-- 兔妈妈：温柔、善良、乐于助人
-- 恐龙妈妈：慈祥、充满母爱
+用户需求：${message}
 
-风格建议：可爱卡通风格，色彩明亮温馨，适合儿童观看`;
-  } else if (hasCat) {
-    return `故事梗概：一只调皮的小猫在城市中探险，发现了一个神秘的花园。
+建议场景结构：
+- 开场：建立氛围和核心视觉元素
+- 发展：展开叙事，展示关键动作
+- 高潮：情感或视觉的最高点
+- 收尾：回归主题，留下余韵
 
-场景描述：
-1. 清晨的阳光照进窗户，一只橘色小猫伸了个懒腰，决定今天要去探索新的地方。
-2. 小猫穿过热闹的街道，跳过篱笆，来到了一个充满鲜花的秘密花园。
-3. 花园里有蝴蝶飞舞，蜜蜂采蜜，小猫追逐着一只漂亮的蝴蝶。
-4. 夕阳西下，小猫带着满满的回忆回家，在窗台上甜甜地睡着了。
-
-角色设定：
-- 橘猫：活泼、好奇、爱冒险
-- 蝴蝶：优雅、美丽、神秘
-
-风格建议：温馨治愈风格，柔和的色彩，细腻的细节`;
-  } else if (hasForest) {
-    return `故事梗概：在一片古老的森林中，隐藏着一个神奇的精灵世界。
-
-场景描述：
-1. 晨雾笼罩着古老的森林，阳光穿透树叶形成美丽的光斑。
-2. 小精灵们在花丛中忙碌，收集露珠和花瓣。
-3. 一只小鹿在林间漫步，与精灵们成为了好朋友。
-4. 夜晚，萤火虫点亮了森林，精灵们围坐在一起讲述古老的故事。
-
-角色设定：
-- 小精灵：可爱、神秘、拥有魔法
-- 小鹿：温顺、善良、勇敢
-
-风格建议：奇幻唯美风格，梦幻的色彩，精致的细节`;
-  } else {
-    return `故事梗概：一个温馨的家庭故事，展现亲情的美好。
-
-场景描述：
-1. 温馨的客厅里，一家人围坐在一起准备晚餐。
-2. 孩子们在院子里玩耍，笑声回荡。
-3. 夕阳下，全家人一起享受美味的晚餐。
-4. 夜晚，孩子们在父母的陪伴下进入梦乡。
-
-角色设定：
-- 父母：慈祥、关爱家人
-- 孩子：活泼、可爱
-
-风格建议：写实温馨风格，温暖的色调，生活化的场景`;
-  }
+请稍后重试，或确保已配置 API Key 后刷新页面。`;
 }
 
 function parseAnalysisFromText(text: string, script: string): Record<string, any> {
-  const hasDinosaur = script.includes('恐龙') || text.includes('恐龙');
-  const hasAnime = script.includes('动漫') || text.includes('动漫') || script.includes('卡通');
-  const hasRealistic = script.includes('写实') || text.includes('写实');
-  
-  // 从脚本和文本中提取时长，支持所有选项 5/10/15/18/30/36/45/60/75/90
-  let duration = '10';
-  const durationPatterns: RegExp[] = [
-    /(\d+)\s*秒/, /(\d+)\s*秒钟/, /(\d+)\s*分钟/, /(\d+)\s*minute/, /(\d+)\s*min/,
-  ];
-  const allText = script + ' ' + text;
-  for (const pattern of durationPatterns) {
-    const match = allText.match(pattern);
-    if (match) {
-      let seconds = parseInt(match[1]);
-      if (pattern.source.includes('分钟') || pattern.source.includes('minute') || pattern.source.includes('min')) {
-        seconds = seconds * 60;
-      }
-      if (seconds <= 5) duration = '5';
-      else if (seconds <= 10) duration = '10';
-      else if (seconds <= 15) duration = '15';
-      else if (seconds <= 18) duration = '18';
-      else if (seconds <= 30) duration = '30';
-      else if (seconds <= 36) duration = '36';
-      else if (seconds <= 45) duration = '45';
-      else if (seconds <= 60) duration = '60';
-      else if (seconds <= 75) duration = '75';
-      else duration = '90';
-      break;
-    }
-  }
-
-  let style = 'realistic';
-  if (hasAnime) style = 'anime';
-  if (script.includes('奇幻') || text.includes('奇幻')) style = 'fantasy';
-  if (script.includes('电影') || text.includes('电影')) style = 'cinematic';
-
-  const firstPeriod = script.indexOf('。');
-  const prompt = firstPeriod > 0 ? script.substring(0, firstPeriod + 1) : script.substring(0, 50);
+  // 极简降级：从文本中提取基本信息，不再硬编码规则
+  // Agent 已在 LLM 层充分分析，这里只是格式化的兜底
+  const durationMatch = (script + ' ' + text).match(/(\d+)\s*秒/);
+  const duration = durationMatch ? durationMatch[1] : '10';
 
   return {
-    prompt: prompt + '，高质量视频',
-    style,
+    prompt: script.substring(0, 100),
+    style: 'auto',
     duration,
-    sceneBreakdown: ['场景1', '场景2', '场景3'],
+    sceneBreakdown: [],
     analysis: text.substring(0, 100),
   };
 }
 
 function generateMockVideoAnalysis(script: string): Record<string, any> {
-  const hasDinosaur = script.includes('恐龙');
-  const hasAnime = script.includes('动漫') || script.includes('卡通');
-  const hasFantasy = script.includes('奇幻');
-  
-  // 从脚本中提取时长，支持所有选项 5/10/15/18/30/36/45/60/75/90
-  let duration = '10';
-  const durationPatterns: RegExp[] = [
-    /(\d+)\s*秒/, /(\d+)\s*秒钟/, /(\d+)\s*分钟/, /(\d+)\s*minute/, /(\d+)\s*min/,
-  ];
-  for (const pattern of durationPatterns) {
-    const match = script.match(pattern);
-    if (match) {
-      let seconds = parseInt(match[1]);
-      if (pattern.source.includes('分钟') || pattern.source.includes('minute') || pattern.source.includes('min')) {
-        seconds = seconds * 60;
-      }
-      if (seconds <= 5) duration = '5';
-      else if (seconds <= 10) duration = '10';
-      else if (seconds <= 15) duration = '15';
-      else if (seconds <= 18) duration = '18';
-      else if (seconds <= 30) duration = '30';
-      else if (seconds <= 36) duration = '36';
-      else if (seconds <= 45) duration = '45';
-      else if (seconds <= 60) duration = '60';
-      else if (seconds <= 75) duration = '75';
-      else duration = '90';
-      break;
-    }
-  }
-
-  let style = 'realistic';
-  if (hasAnime) style = 'anime';
-  if (hasFantasy) style = 'fantasy';
-
-  const firstPeriod = script.indexOf('。');
-  const prompt = firstPeriod > 0 ? script.substring(0, firstPeriod + 1) : script.substring(0, 50);
+  const durationMatch = script.match(/(\d+)\s*秒/);
+  const duration = durationMatch ? durationMatch[1] : '10';
 
   return {
-    prompt: prompt + '，高质量视频',
-    style,
+    prompt: script.substring(0, 100),
+    style: 'auto',
     duration,
-    sceneBreakdown: ['场景1', '场景2', '场景3'],
-    analysis: '基于脚本分析，提取了核心主题和视觉风格',
+    sceneBreakdown: [],
+    analysis: 'AI模型不可用，请稍后重试',
   };
 }
 
 function parseImageAnalysisFromText(text: string, message: string): Record<string, any> {
-  const hasAnime = message.includes('动漫') || text.includes('动漫');
-  const hasRealistic = message.includes('写实') || text.includes('写实');
-  
-  let style = 'realistic';
-  if (hasAnime) style = 'anime';
-  if (message.includes('奇幻') || text.includes('奇幻')) style = 'fantasy';
-  if (message.includes('油画') || text.includes('油画')) style = 'oil-painting';
-
   return {
-    prompt: message + '，高质量图像',
-    style,
-    composition: '居中构图',
+    prompt: message,
+    style: 'auto',
+    composition: 'auto',
     analysis: text.substring(0, 100),
   };
 }
 
 function generateMockImageAnalysis(message: string): Record<string, any> {
-  const hasAnime = message.includes('动漫');
-  const hasFantasy = message.includes('奇幻');
-  
-  let style = 'realistic';
-  if (hasAnime) style = 'anime';
-  if (hasFantasy) style = 'fantasy';
-
   return {
-    prompt: message + '，高质量图像',
-    style,
-    composition: '居中构图',
-    analysis: '基于用户需求分析，提取了核心元素和风格',
+    prompt: message,
+    style: 'auto',
+    composition: 'auto',
+    analysis: 'AI模型不可用，请稍后重试',
   };
 }
 

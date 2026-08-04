@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Send, Image, Video, Wand2, Layers, RefreshCw, Trash2, Download, Play, X, Sparkles, Brain, Eye, ChevronDown, ChevronUp, Users, Upload, Plus, StopCircle } from 'lucide-react';
+import { Send, Image, Video, Wand2, Layers, RefreshCw, Trash2, Download, Play, X, Sparkles, Brain, Eye, ChevronDown, ChevronUp, Users, Upload, Plus, StopCircle, Link as LinkIcon } from 'lucide-react';
 import ImageUploader from './ImageUploader';
 import ChatHistory from './ChatHistory';
 
@@ -34,6 +34,10 @@ interface ChatMessage {
   sessionId?: string;
   originalPrompt?: string;
   modifyHistory?: { prompt: string; result: string; timestamp: number }[];
+  /** 推理模型的 chain-of-thought 思考过程 */
+  reasoning?: string;
+  /** 使用的模型类型：reasoning | instruction */
+  modelUsed?: string;
 }
 
 interface AgentThought {
@@ -98,6 +102,8 @@ export default function AIAssistant() {
   const [currentSession, setCurrentSession] = useState<ChatSession | null>(null);
   const [modifyInputId, setModifyInputId] = useState<string | null>(null);
   const [modifyInput, setModifyInput] = useState('');
+  const [modifyRefImageUrl, setModifyRefImageUrl] = useState<string | null>(null); // 引用外部图片
+  const [refImageUrlInput, setRefImageUrlInput] = useState(''); // 外部图片 URL 输入
   // 会话列表版本号：每次创建/删除会话时递增，触发 ChatHistory 重新加载
   const [sessionListVersion, setSessionListVersion] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -126,6 +132,10 @@ export default function AIAssistant() {
   // 待发送的附件图片（支持多图），发送时与文字一起提交
   const [pendingAttachmentImages, setPendingAttachmentImages] = useState<string[]>([]);
   const multiFileInputRef = useRef<HTMLInputElement>(null);
+  // 图片 URL 粘贴输入
+  const [imageUrlInput, setImageUrlInput] = useState('');
+  const [showImageUrlInput, setShowImageUrlInput] = useState(false);
+  const [urlPreviewError, setUrlPreviewError] = useState<string | null>(null);
 
   useEffect(() => {
     initSession();
@@ -471,6 +481,26 @@ export default function AIAssistant() {
     }
   }, [messages]);
 
+  // 自动展开 Agent 思考流程：新消息带有 agentThoughts 或 reasoning 时默认展开
+  useEffect(() => {
+    const newExpanded = new Set(expandedThoughts);
+    let changed = false;
+    for (const msg of messages) {
+      if (msg.agentThoughts && msg.agentThoughts.length > 0 && !newExpanded.has(msg.id)) {
+        newExpanded.add(msg.id);
+        changed = true;
+      }
+      if (msg.reasoning && !newExpanded.has(`reasoning-${msg.id}`)) {
+        newExpanded.add(`reasoning-${msg.id}`);
+        changed = true;
+      }
+    }
+    if (changed) {
+      setExpandedThoughts(newExpanded);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages]);
+
   // 自动持久化：messages 变化时防抖保存到后端会话，确保刷新/切换页面不丢失聊天内容
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
@@ -578,11 +608,70 @@ export default function AIAssistant() {
     };
   }
 
-  async function callHermesAgent(message: string, history: ChatMessage[], signal?: AbortSignal): Promise<{ action?: string; params?: Record<string, any>; response: string }> {
+  /**
+   * 将推理模型的思考过程解析为可视化的步骤
+   * 支持多种格式：按句号/换行拆分，识别"第N步"、"步骤N"等模式
+   */
+  function parseReasoningSteps(reasoning: string): string[] {
+    if (!reasoning) return [];
+
+    // 尝试按"步骤"关键词拆分
+    const stepPattern = /(?:第\d+步[：:]|步骤\d+[：:]|\d+\.[\s]*)/g;
+    const stepMatches = [...reasoning.matchAll(stepPattern)];
+
+    if (stepMatches.length >= 2) {
+      // 按步骤关键词拆分
+      const steps: string[] = [];
+      for (let i = 0; i < stepMatches.length; i++) {
+        const start = stepMatches[i].index!;
+        const end = i + 1 < stepMatches.length ? stepMatches[i + 1].index! : reasoning.length;
+        steps.push(reasoning.substring(start, end).trim());
+      }
+      return steps.filter(s => s.length > 5);
+    }
+
+    // 按换行拆分
+    const lines = reasoning.split('\n').filter(l => l.trim().length > 5);
+    if (lines.length >= 2) return lines.map(l => l.trim()).slice(0, 8);
+
+    // 按句号拆分为几个大段
+    const sentences = reasoning.split(/[。.；;]/).filter(s => s.trim().length > 5);
+    if (sentences.length >= 2) return sentences.map(s => s.trim() + '。').slice(0, 8);
+
+    return [reasoning.trim()];
+  }
+
+  /**
+   * 格式化推理过程为可读的展示文本
+   */
+  function formatReasoningDisplay(steps: string[], modelUsed: string): string {
+    if (steps.length === 0) return '';
+
+    const modelLabel = modelUsed === 'reasoning'
+      ? '🧠 推理模型深度分析过程'
+      : '🤖 AI 分析过程';
+
+    if (steps.length === 1) {
+      return `${modelLabel}：\n${steps[0]}`;
+    }
+
+    const stepLines = steps.map((step, i) => {
+      // 提取步骤标题（第一句话作为标题）
+      const firstSentence = step.split(/[。.]/)[0];
+      const title = firstSentence.length > 30
+        ? firstSentence.substring(0, 30) + '...'
+        : firstSentence;
+      return `**步骤${i + 1}：** ${title}\n${step.length > 80 ? step.substring(0, 80) + '...' : step}`;
+    });
+
+    return `${modelLabel}：\n\n${stepLines.join('\n\n')}`;
+  }
+
+  async function callHermesAgent(message: string, history: ChatMessage[], signal?: AbortSignal): Promise<{ action?: string; params?: Record<string, any>; response: string; reasoning?: string; modelUsed?: string }> {
     try {
       const response = await fetch('/api/hermes/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify({
           message,
           history: history.slice(-10).map(m => ({
@@ -598,6 +687,8 @@ export default function AIAssistant() {
         action: data.action,
         params: data.params,
         response: data.response || '我理解你的需求了，正在帮你处理...',
+        reasoning: data.reasoning || '',
+        modelUsed: data.modelUsed || 'instruction',
       };
     } catch {
       return { response: '我理解你的需求了，正在帮你处理...' };
@@ -605,11 +696,11 @@ export default function AIAssistant() {
   }
 
   // 多模态混合聊天：支持多图+文字
-  async function callHermesWithImage(message: string, imageUrls: string[], signal?: AbortSignal): Promise<{ action?: string; params?: Record<string, any>; response: string }> {
+  async function callHermesWithImage(message: string, imageUrls: string[], signal?: AbortSignal): Promise<{ action?: string; params?: Record<string, any>; response: string; reasoning?: string; modelUsed?: string }> {
     try {
       const response = await fetch('/api/hermes/chat-with-image', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify({ imageUrls, message, history: messages.slice(-10) }),
         signal,
       });
@@ -619,19 +710,21 @@ export default function AIAssistant() {
         action: data.action,
         params: data.params,
         response: data.response || '📸 已分析你的图片，正在帮你处理...',
+        reasoning: data.reasoning || '',
+        modelUsed: data.modelUsed || 'instruction',
       };
     } catch {
       return { response: '我理解你的需求了，正在帮你处理...' };
     }
   }
 
-  async function callStoryWriter(message: string): Promise<{ success: boolean; script?: string; thoughts?: AgentThought[]; sessionId?: string }> {
+  async function callStoryWriter(message: string): Promise<{ success: boolean; script?: string; thoughts?: AgentThought[]; sessionId?: string; reasoning?: string; modelUsed?: string }> {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 30000);
       const response = await fetch('/api/agents/story/write', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify({
           message,
           history: messages.slice(-10).map(m => ({ role: m.role, content: m.content })),
@@ -645,6 +738,8 @@ export default function AIAssistant() {
         script: data.result?.script,
         thoughts: data.thoughts,
         sessionId: data.sessionId,
+        reasoning: data.reasoning || '',
+        modelUsed: data.modelUsed || 'instruction',
       };
     } catch (error) {
       console.error('Story writer error:', error);
@@ -652,13 +747,13 @@ export default function AIAssistant() {
     }
   }
 
-  async function callVideoAnalyzer(script: string, sessionId?: string, originalMessage?: string): Promise<{ success: boolean; result?: Record<string, any>; thoughts?: AgentThought[] }> {
+  async function callVideoAnalyzer(script: string, sessionId?: string, originalMessage?: string): Promise<{ success: boolean; result?: Record<string, any>; thoughts?: AgentThought[]; reasoning?: string; modelUsed?: string }> {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 30000);
       const response = await fetch('/api/agents/video/analyze', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify({
           script,
           sessionId,
@@ -673,6 +768,8 @@ export default function AIAssistant() {
         success: data.success,
         result: data.result,
         thoughts: data.thoughts,
+        reasoning: data.reasoning || '',
+        modelUsed: data.modelUsed || 'instruction',
       };
     } catch (error) {
       console.error('Video analyzer error:', error);
@@ -680,13 +777,13 @@ export default function AIAssistant() {
     }
   }
 
-  async function callImageAnalyzer(message: string): Promise<{ success: boolean; result?: Record<string, any>; thoughts?: AgentThought[] }> {
+  async function callImageAnalyzer(message: string): Promise<{ success: boolean; result?: Record<string, any>; thoughts?: AgentThought[]; reasoning?: string; modelUsed?: string }> {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 20000);
       const response = await fetch('/api/agents/image/analyze', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify({
           message,
           history: messages.slice(-10).map(m => ({ role: m.role, content: m.content })),
@@ -699,6 +796,8 @@ export default function AIAssistant() {
         success: data.success,
         result: data.result,
         thoughts: data.thoughts,
+        reasoning: data.reasoning || '',
+        modelUsed: data.modelUsed || 'instruction',
       };
     } catch (error) {
       console.error('Image analyzer error:', error);
@@ -858,14 +957,14 @@ export default function AIAssistant() {
     }
   }
 
-  async function modifyImageAction(messageId: string, originalPrompt: string, modifyInstruction: string, style: string = 'realistic') {
+  async function modifyImageAction(messageId: string, originalPrompt: string, modifyInstruction: string, style: string = 'realistic', refImageUrl?: string) {
     const loadingId = `modify-loading-${Date.now()}`;
     const controller = new AbortController();
     activeTasksRef.current.set(loadingId, controller);
     setMessages(prev => [...prev, {
       id: loadingId,
       role: 'assistant',
-      content: '🎨 正在根据你的需求修改图片...',
+      content: refImageUrl ? '🎨 正在根据参考图和你的需求修改图片...' : '🎨 正在根据你的需求修改图片...',
       actionType: 'image',
       isGenerating: true,
       progress: 0,
@@ -876,11 +975,12 @@ export default function AIAssistant() {
       const apiUrl = useMock ? '/api/mock/generate' : '/api/generate/modify';
       const response = await fetch(apiUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify({
           originalPrompt,
           modifyInstruction,
           style,
+          ...(refImageUrl ? { refImageUrl } : {}),
         }),
         signal: controller.signal,
       });
@@ -1693,6 +1793,98 @@ export default function AIAssistant() {
     setPendingAttachmentImages([]);
   }
 
+  // 通过 URL 添加图片（粘贴或手动输入）
+  function addImageByUrl(url: string) {
+    const trimmed = url.trim();
+    if (!trimmed) return;
+
+    // 验证是否为图片 URL
+    const isImageUrl = /\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?.*)?$/i.test(trimmed) ||
+      /^https?:\/\/.*\.(jpg|jpeg|png|gif|webp|bmp)(\?.*)?$/i.test(trimmed) ||
+      trimmed.startsWith('data:image/');
+
+    if (!isImageUrl) {
+      setUrlPreviewError('请输入有效的图片链接（支持 jpg/png/gif/webp/bmp 格式）');
+      return;
+    }
+
+    if (pendingAttachmentImages.length >= 5) {
+      setUrlPreviewError('最多附加 5 张图片');
+      return;
+    }
+
+    setUrlPreviewError(null);
+    setPendingAttachmentImages(prev => [...prev, trimmed]);
+    setImageUrlInput('');
+  }
+
+  // 处理粘贴事件：支持图片文件和图片 URL
+  function handleInputPaste(e: React.ClipboardEvent<HTMLInputElement>) {
+    const items = e.clipboardData.items;
+
+    // 优先处理剪贴板中的图片文件（Ctrl+V 截图等）
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (file) {
+          uploadPastedImage(file);
+          return;
+        }
+      }
+    }
+
+    // 检查粘贴的文本是否为图片 URL
+    const text = e.clipboardData.getData('text').trim();
+    if (text && /^https?:\/\/.*\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?.*)?$/i.test(text)) {
+      e.preventDefault();
+      addImageByUrl(text);
+    }
+  }
+
+  // 上传粘贴的图片文件
+  async function uploadPastedImage(file: File) {
+    if (pendingAttachmentImages.length >= 5) {
+      setUrlPreviewError('最多附加 5 张图片');
+      return;
+    }
+
+    setIsUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('image', file);
+
+      const response = await fetch('/api/upload/image', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const result = await response.json();
+      if (result.success && result.imageUrl) {
+        setPendingAttachmentImages(prev => [...prev, result.imageUrl]);
+      } else {
+        setUrlPreviewError(result.error || '图片上传失败');
+      }
+    } catch (err) {
+      setUrlPreviewError('图片上传失败，请检查网络');
+    } finally {
+      setIsUploading(false);
+    }
+  }
+
+  // 处理 URL 输入框的键盘事件
+  function handleImageUrlKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addImageByUrl(imageUrlInput);
+    } else if (e.key === 'Escape') {
+      setShowImageUrlInput(false);
+      setImageUrlInput('');
+      setUrlPreviewError(null);
+    }
+  }
+
   // 从队列中删除指定消息
   function removeFromQueue(queueId: string) {
     setMessageQueue(prev => prev.filter(item => item.id !== queueId));
@@ -1804,23 +1996,27 @@ export default function AIAssistant() {
     setInput('');
     setIsTyping(true);
 
-    // 展示 Agent 思考状态
+    // 展示 Agent 思考状态（带推理模型的实时思考过程）
     const thinkingId = `thinking-${Date.now()}`;
     setMessages(prev => [...prev, {
       id: thinkingId,
       role: 'assistant',
-      content: '🤔 AI 助手正在理解你的需求...',
+      content: '🧠 推理模型正在分析你的需求...',
       actionType: 'general',
       isGenerating: true,
       timestamp: Date.now(),
     }]);
 
-    // 实时展示思考阶段变化
+    // 实时展示思考阶段变化（等待推理模型返回时展示阶段动画）
     const thinkingTimer = setInterval(() => {
       setMessages(prev => prev.map(m => {
         if (m.id === thinkingId && m.isGenerating) {
           const d = new Date().getSeconds() % 3;
-          const phases = ['🤔 AI 助手正在理解你的需求', '🔍 AI 助手正在分析意图', '🧠 AI 助手正在规划方案'];
+          const phases = [
+            '🧠 推理模型正在分析你的需求',
+            '🔍 推理模型正在识别意图',
+            '💡 推理模型正在规划方案',
+          ];
           const phase = phases[Math.floor(new Date().getSeconds() / 3) % phases.length];
           return { ...m, content: `${phase}${'.'.repeat(d + 1)}` };
         }
@@ -1842,8 +2038,25 @@ export default function AIAssistant() {
       clearInterval(thinkingTimer);
       activeTasksRef.current.delete(agentTaskId);
 
-      // 移除思考消息
-      setMessages(prev => prev.filter(m => m.id !== thinkingId));
+      // 推理模型返回了真实思考过程 → 替换 thinking 消息为简短的模型标识
+      // 真正的分析结果在后面的 assistantMessage 中展示
+      if (hermesResult.reasoning) {
+        setMessages(prev => prev.map(m => {
+          if (m.id === thinkingId) {
+            return {
+              ...m,
+              content: `🧠 **推理模型分析完成**（${hermesResult.modelUsed === 'reasoning' ? 'DeepSeek-R1 / GLM-Z1' : 'AI模型'}）`,
+              isGenerating: false,
+              reasoning: hermesResult.reasoning,
+              modelUsed: hermesResult.modelUsed,
+            };
+          }
+          return m;
+        }));
+      } else {
+        // 没有推理过程，移除 thinking 消息
+        setMessages(prev => prev.filter(m => m.id !== thinkingId));
+      }
 
       let actionResult = recognizeAction(sendText);
       
@@ -1893,6 +2106,8 @@ export default function AIAssistant() {
         actionType: actionResult.action as any,
         params: actionResult.params,
         timestamp: Date.now(),
+        reasoning: hermesResult.reasoning,
+        modelUsed: hermesResult.modelUsed,
       };
 
       setMessages(prev => [...prev, assistantMessage]);
@@ -1953,9 +2168,11 @@ export default function AIAssistant() {
               if (m.id === loadingId) {
                 return {
                   ...m,
-                  content: `📝 脚本创作完成！\n\n${storyResult.script.substring(0, 200)}${storyResult.script.length > 200 ? '...' : ''}${scriptReviewBadge}`,
+                  content: `📝 **脚本创作完成！**\n\n${storyResult.script}${scriptReviewBadge}`,
                   agentThoughts: storyResult.thoughts,
                   sessionId: storyResult.sessionId,
+                  reasoning: storyResult.reasoning,
+                  modelUsed: storyResult.modelUsed,
                   isGenerating: false, // 脚本创作完成，立即清理 isGenerating 状态
                 };
               }
@@ -1995,10 +2212,10 @@ export default function AIAssistant() {
                 mergedResult.duration = userDuration;
               }
 
-              // 构建分析结果展示（包含分镜信息）
+              // 构建分析结果展示（完整展示分镜信息和 prompt）
               const resultPreview = mergedResult.sceneBreakdown && mergedResult.sceneBreakdown.length > 0
-                ? `🎬 视频分析完成！\n\n📋 **分镜脚本（${mergedResult.sceneBreakdown.length} 个镜头，${mergedResult.duration}秒）**：\n${mergedResult.sceneBreakdown.map((s: any) => `  ${s.scene}. ${s.description || s.prompt?.substring(0, 40)}（${s.duration}秒）`).join('\n')}\n\n🎨 风格：${mergedResult.style || 'auto'}\n📝 Prompt：${mergedResult.prompt?.substring(0, 80)}...`
-                : `🎬 视频分析完成！\n\n🎨 风格：${mergedResult.style || 'auto'}\n⏱ 时长：${mergedResult.duration || '10'}秒\n📝 Prompt：${mergedResult.prompt?.substring(0, 100)}...`;
+                ? `🎬 **视频分析完成！**\n\n📋 **分镜脚本（${mergedResult.sceneBreakdown.length} 个镜头，${mergedResult.duration}秒）**：\n${mergedResult.sceneBreakdown.map((s: any) => `  ${s.scene}. ${s.description || s.prompt}（${s.duration}秒）`).join('\n')}\n\n🎨 风格：${mergedResult.style || 'auto'}\n📝 Prompt：${mergedResult.prompt || ''}`
+                : `🎬 **视频分析完成！**\n\n🎨 风格：${mergedResult.style || 'auto'}\n⏱ 时长：${mergedResult.duration || '10'}秒\n📝 Prompt：${mergedResult.prompt || ''}`;
 
               setMessages(prev => prev.map(m => {
                 if (m.id === analyzerLoadingId) {
@@ -2006,6 +2223,8 @@ export default function AIAssistant() {
                     ...m,
                     content: resultPreview,
                     agentThoughts: allThoughts,
+                    reasoning: analyzeResult.reasoning,
+                    modelUsed: analyzeResult.modelUsed,
                     isGenerating: false,
                   };
                 }
@@ -2381,7 +2600,7 @@ export default function AIAssistant() {
                     className="w-full h-auto max-h-64 object-contain"
                   />
                   <div className="p-3 bg-gray-50 border-t border-gray-200">
-                    <div className="flex gap-2 mb-2">
+                    <div className="flex gap-2 mb-2 flex-wrap">
                       <button
                         onClick={() => {
                           setModifyInputId(modifyInputId === message.id ? null : message.id);
@@ -2391,6 +2610,22 @@ export default function AIAssistant() {
                       >
                         <Wand2 className="w-3 h-3" />
                         修改图片
+                      </button>
+                      {/* 引用外部图片链接进行修改 */}
+                      <button
+                        onClick={() => {
+                          setModifyInputId(modifyInputId === message.id ? null : message.id);
+                          setModifyInput('');
+                          setModifyRefImageUrl(modifyRefImageUrl === message.id ? null : message.id);
+                        }}
+                        className={`flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg transition-colors ${
+                          modifyRefImageUrl === message.id
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200'
+                        }`}
+                      >
+                        <LinkIcon className="w-3 h-3" />
+                        引用外部图片
                       </button>
                       <button
                         onClick={() => {
@@ -2405,6 +2640,51 @@ export default function AIAssistant() {
                         下载
                       </button>
                     </div>
+                    {/* 引用外部图片 URL 输入 */}
+                    {modifyRefImageUrl === message.id && (
+                      <div className="mb-2">
+                        <div className="flex items-center gap-1 mb-1">
+                          <LinkIcon className="w-3 h-3 text-blue-500" />
+                          <span className="text-xs text-blue-600">粘贴外部图片链接进行修改</span>
+                        </div>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={refImageUrlInput}
+                            onChange={(e) => setRefImageUrlInput(e.target.value)}
+                            placeholder="粘贴图片 URL，如 https://example.com/image.jpg"
+                            className="flex-1 px-3 py-1.5 text-xs border border-blue-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400"
+                          />
+                          <button
+                            onClick={() => {
+                              if (!refImageUrlInput.trim()) return;
+                              // 将外部图片 URL 作为参考图，发起修改
+                              modifyImageAction(
+                                message.id,
+                                `参考图: ${refImageUrlInput.trim()}`,
+                                modifyInput.trim() || '根据参考图风格重新生成',
+                                (message.params?.style) || 'realistic',
+                                refImageUrlInput.trim(),
+                              );
+                              setRefImageUrlInput('');
+                              setModifyRefImageUrl(null);
+                            }}
+                            disabled={!refImageUrlInput.trim()}
+                            className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+                          >
+                            引用并生成
+                          </button>
+                        </div>
+                        {refImageUrlInput.trim() && /^https?:\/\/.*\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i.test(refImageUrlInput.trim()) && (
+                          <img
+                            src={refImageUrlInput.trim()}
+                            alt="预览"
+                            className="mt-2 w-24 h-24 object-cover rounded-lg border border-blue-200"
+                            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                          />
+                        )}
+                      </div>
+                    )}
                     {modifyInputId === message.id && (
                       <div className="flex gap-2">
                         <input
@@ -2491,11 +2771,12 @@ export default function AIAssistant() {
                 </div>
               )}
 
+              {/* Agent 思考流程（故事创作专家/视频制作专家/图像创作专家的步骤） */}
               {message.agentThoughts && message.agentThoughts.length > 0 && (
                 <div className="mt-3">
                   <button
                     onClick={() => toggleThoughts(message.id)}
-                    className="flex items-center gap-1 text-xs text-purple-600 hover:text-purple-700 transition-colors"
+                    className="flex items-center gap-1 text-xs text-purple-600 hover:text-purple-700 transition-colors font-medium"
                   >
                     {expandedThoughts.has(message.id) ? (
                       <>
@@ -2505,44 +2786,97 @@ export default function AIAssistant() {
                     ) : (
                       <>
                         <ChevronDown className="w-4 h-4" />
-                        查看AI思考流程
+                        📋 查看AI思考流程（{message.agentThoughts.length} 步）
                       </>
                     )}
                   </button>
                   
                   {expandedThoughts.has(message.id) && (
-                    <div className="mt-2 p-3 bg-gray-50 rounded-lg border border-gray-200">
-                      <div className="flex items-center gap-1 text-xs text-gray-500 mb-2">
-                        <Brain className="w-3 h-3" />
-                        <span>AI思考流程</span>
-                      </div>
-                      <div className="space-y-2">
-                        {message.agentThoughts.map((thought, index) => (
-                          <div
-                            key={index}
-                            className="flex gap-2"
-                          >
-                            <div className={`flex-shrink-0 w-2 h-2 rounded-full ${
-                              thought.action === 'script_generated' || thought.action === 'parameters_extracted'
-                                ? 'bg-green-500'
-                                : 'bg-blue-500'
-                            }`} />
-                            <div className="flex-1">
-                              <div className="flex items-center gap-2 mb-1">
+                    <div className="mt-2 space-y-2">
+                      {message.agentThoughts.map((thought, index) => {
+                        const isLast = index === message.agentThoughts!.length - 1;
+                        const stepColor = thought.action === 'script_generated' || thought.action === 'parameters_extracted'
+                          ? 'border-green-200 bg-green-50'
+                          : 'border-blue-200 bg-blue-50';
+                        const dotColor = thought.action === 'script_generated' || thought.action === 'parameters_extracted'
+                          ? 'bg-green-500'
+                          : 'bg-blue-500';
+                        const stepIcon = index === 0 ? '🔍' : index === 1 ? '⚙️' : '✅';
+
+                        return (
+                          <div key={index} className="flex gap-3">
+                            {/* 左侧步骤连线 */}
+                            <div className="flex flex-col items-center">
+                              <div className={`w-6 h-6 rounded-full ${dotColor} flex items-center justify-center text-white text-xs font-bold`}>
+                                {index + 1}
+                              </div>
+                              {!isLast && (
+                                <div className="w-0.5 flex-1 min-h-[20px] bg-gray-200 my-0.5" />
+                              )}
+                            </div>
+                            {/* 右侧步骤内容 */}
+                            <div className={`flex-1 p-3 rounded-lg border ${stepColor} ${isLast ? 'mb-0' : 'mb-0'}`}>
+                              <div className="flex items-center gap-2 mb-1.5">
+                                <span className="text-sm">{stepIcon}</span>
                                 <span className={`px-1.5 py-0.5 text-xs rounded font-medium ${getAgentColor(thought.agentName)}`}>
                                   {thought.agentName}
                                 </span>
-                                <span className="text-xs text-gray-400">步骤 {thought.step}</span>
+                                <span className="text-xs text-gray-400">第 {thought.step} 步</span>
                               </div>
-                              <p className="text-xs text-gray-600">{thought.thought}</p>
+                              <p className="text-xs text-gray-700 leading-relaxed">{thought.thought}</p>
                               {thought.output && (
-                                <p className="mt-1 text-xs text-gray-500 bg-white px-2 py-1 rounded border border-gray-200">
-                                  {thought.output}
-                                </p>
+                                <div className="mt-2 pt-2 border-t border-gray-200">
+                                  <p className="text-xs text-gray-500 font-mono whitespace-pre-wrap break-all">
+                                    {thought.output}
+                                  </p>
+                                </div>
                               )}
                             </div>
                           </div>
-                        ))}
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 🧠 推理模型的深度思考链（DeepSeek-R1 / GLM-Z1 的 chain-of-thought） */}
+              {message.reasoning && (
+                <div className="mt-3">
+                  <button
+                    onClick={() => toggleThoughts(`reasoning-${message.id}`)}
+                    className="flex items-center gap-1 text-xs text-amber-600 hover:text-amber-700 transition-colors font-medium"
+                  >
+                    {expandedThoughts.has(`reasoning-${message.id}`) ? (
+                      <>
+                        <ChevronUp className="w-4 h-4" />
+                        收起推理过程
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown className="w-4 h-4" />
+                        🧠 查看推理模型深度思考过程
+                      </>
+                    )}
+                  </button>
+
+                  {expandedThoughts.has(`reasoning-${message.id}`) && (
+                    <div className="mt-2 p-4 bg-gradient-to-br from-amber-50 to-orange-50 rounded-lg border border-amber-200">
+                      <div className="flex items-center gap-2 mb-3 pb-2 border-b border-amber-200">
+                        <div className="w-6 h-6 rounded-full bg-amber-500 flex items-center justify-center">
+                          <Brain className="w-3.5 h-3.5 text-white" />
+                        </div>
+                        <div>
+                          <span className="text-sm font-semibold text-amber-800">
+                            {message.modelUsed === 'reasoning' ? '推理模型 Chain-of-Thought' : 'AI 分析过程'}
+                          </span>
+                          <span className="ml-2 text-xs text-amber-500 font-mono">
+                            {message.modelUsed === 'reasoning' ? 'DeepSeek-R1 / GLM-Z1' : '指令模型'}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap max-h-80 overflow-y-auto font-mono text-xs">
+                        {message.reasoning}
                       </div>
                     </div>
                   )}
@@ -2650,6 +2984,49 @@ export default function AIAssistant() {
           </div>
         )}
 
+        {/* 图片 URL 输入区域（粘贴或手动输入链接） */}
+        {showImageUrlInput && (
+          <div className="mb-2 px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="flex items-center gap-2">
+              <LinkIcon className="w-4 h-4 text-blue-500" />
+              <span className="text-xs font-medium text-blue-700">粘贴图片链接</span>
+              <span className="text-xs text-blue-400">支持 jpg/png/gif/webp/bmp</span>
+              <button
+                onClick={() => { setShowImageUrlInput(false); setImageUrlInput(''); setUrlPreviewError(null); }}
+                className="ml-auto text-xs text-gray-400 hover:text-gray-600"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="flex gap-2 mt-2">
+              <input
+                type="text"
+                value={imageUrlInput}
+                onChange={(e) => { setImageUrlInput(e.target.value); setUrlPreviewError(null); }}
+                onKeyDown={handleImageUrlKeyDown}
+                onPaste={handleInputPaste}
+                placeholder="粘贴图片 URL，按 Enter 添加..."
+                className="flex-1 px-3 py-1.5 text-sm border border-blue-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400"
+                autoFocus
+              />
+              <button
+                onClick={() => addImageByUrl(imageUrlInput)}
+                disabled={!imageUrlInput.trim()}
+                className={`px-3 py-1.5 text-sm rounded-lg font-medium transition-colors ${
+                  imageUrlInput.trim()
+                    ? 'bg-blue-600 text-white hover:bg-blue-700'
+                    : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                }`}
+              >
+                添加
+              </button>
+            </div>
+            {urlPreviewError && (
+              <p className="mt-1.5 text-xs text-red-500">{urlPreviewError}</p>
+            )}
+          </div>
+        )}
+
         {/* 消息等待队列面板 */}
         {messageQueue.length > 0 && (
           <div className="mb-3 px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg">
@@ -2720,6 +3097,21 @@ export default function AIAssistant() {
                 多图+文字混合发送
               </div>
             </div>
+            {/* 粘贴图片链接按钮 */}
+            <div className="relative group">
+              <button
+                onClick={() => setShowImageUrlInput(!showImageUrlInput)}
+                className={`p-2 rounded-lg transition-colors ${
+                  showImageUrlInput ? 'text-blue-600 bg-blue-50' : 'text-gray-500 hover:text-blue-600 hover:bg-blue-50'
+                }`}
+                title="粘贴图片链接（支持 Ctrl+V 粘贴截图或图片 URL）"
+              >
+                <LinkIcon className="w-5 h-5" />
+              </button>
+              <div className="absolute -top-8 left-1/2 -translate-x-1/2 px-2 py-1 bg-gray-800 text-white text-xs rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
+                粘贴图片链接
+              </div>
+            </div>
             <div className="relative group">
               <button
                 onClick={() => setShowUploader(!showUploader)}
@@ -2740,10 +3132,11 @@ export default function AIAssistant() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+              onPaste={handleInputPaste}
               placeholder={
                 abortCooldown > 0
                   ? `任务终止冷却中，请等待 ${abortCooldown} 秒...`
-                  : '输入你的需求，如：帮我生成一个10秒的小恐龙视频...'
+                  : '输入需求，或 Ctrl+V 粘贴截图/图片链接...'
               }
               className={`w-full px-4 py-2.5 border-none rounded-full focus:outline-none focus:ring-2 transition-all ${
                 abortCooldown > 0

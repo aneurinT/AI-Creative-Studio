@@ -51,6 +51,7 @@ import uploadRoutes from './routes/upload.js'
 import chatRoutes from './routes/chat.js'
 import ltxRoutes from './routes/ltx.js'
 import knowledgeRoutes from './routes/knowledge.js'
+import ocrRoutes from './routes/ocr.js'
 import { seedKnowledgeBase } from './services/ragKnowledge.js'
 
 // for esm mode
@@ -97,6 +98,7 @@ app.use('/api/upload', uploadRoutes)
 app.use('/api/chat', chatRoutes)
 app.use('/api/ltx', ltxRoutes)
 app.use('/api/knowledge', knowledgeRoutes)
+app.use('/api/ocr', ocrRoutes)
 
 /**
  * health

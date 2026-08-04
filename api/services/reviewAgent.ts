@@ -10,6 +10,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { REASONING_MODEL, REASONING_API, getReasoningApiKey, REASONING_FALLBACK_MODEL, REASONING_FALLBACK_API, getReasoningFallbackApiKey } from './llmConfig.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,7 +18,7 @@ const __dirname = path.dirname(__filename);
 // ----- 审核 Agent 配置 -----
 
 const ZHIPU_API_URL = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
-const REVIEW_MODEL = 'glm-4-flash'; // 轻量模型，审核不需要视觉
+const REVIEW_MODEL = 'glm-4-flash'; // 轻量指令模型，审核回退时使用
 
 export interface ReviewResult {
   /** 是否通过审核（用户意图与 Agent 理解一致） */
@@ -147,6 +148,168 @@ export async function recordMemory(message: string, correctAction: string, corre
 // ----- 审核 Agent -----
 
 /**
+ * 使用推理模型审核（DeepSeek-R1 / GLM-Z1）
+ * 推理模型会进行 chain-of-thought 分析，更准确判断意图偏差
+ */
+async function reviewWithReasoning(
+  userMessage: string,
+  agentAction: string,
+  agentParams: Record<string, any>,
+  agentDescription: string,
+): Promise<ReviewResult | null> {
+  const systemPrompt = `你是审核 Agent 的推理核心。你需要逐步推理来判断 AI 助手对用户需求的理解是否准确。
+
+## 推理步骤
+
+### 步骤1：提取用户真实意图
+分析用户原始消息，提取：
+- 用户想做什么？（画图/做视频/修改/抠图/合成/闲聊）
+- 有没有明确的风格要求？（动漫/写实/电影/3D/插画）
+- 有没有明确的时长/尺寸要求？
+
+### 步骤2：对比 AI 理解
+对比 AI 助手的 action 和 params 是否与步骤1的提取结果一致：
+- action 类型是否匹配？
+- style 是否匹配？
+- duration/size 是否匹配？
+
+### 步骤3：判定偏差等级
+- 无偏差：action 和关键参数都匹配 → passed=true, confidence>=0.9
+- 轻微偏差：action 正确但部分参数不匹配 → passed=false, status="corrected"
+- 严重偏差：action 类型都错了 → passed=false, status="failed", confidence<0.4
+
+### 步骤4：输出修正
+如果存在偏差，给出 correctedAction 和 correctedParams。
+
+## 输出格式（严格JSON）
+{"passed":true,"confidence":0.95,"explanation":"用户意图与理解一致"}
+{"passed":false,"confidence":0.3,"explanation":"用户要视频但理解为图片","correctedAction":"video","correctedParams":{"prompt":"...","style":"cinematic","duration":18}}`;
+
+  const userPrompt = `【用户原始需求】"${userMessage}"
+【AI 助手理解】action: "${agentAction}", params: ${JSON.stringify(agentParams)}, 描述: "${agentDescription}"
+
+请按推理步骤逐步分析，然后输出审核结果 JSON。`;
+
+  // 尝试 DeepSeek-R1
+  const r1Key = getReasoningApiKey();
+  if (r1Key) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+      const response = await fetch(REASONING_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${r1Key}` },
+        body: JSON.stringify({
+          model: REASONING_MODEL,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          temperature: 0.3,
+          max_tokens: 2000,
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        const data = await response.json() as any;
+        const msg = data.choices?.[0]?.message;
+        const reasoning = msg?.reasoning_content || '';
+        const content = msg?.content?.trim();
+
+        if (content) {
+          const result = parseReviewJSON(content, agentAction, agentParams);
+          if (reasoning) {
+            console.log(`[ReviewAgent] Reasoning: ${reasoning.substring(0, 200)}...`);
+          }
+          return result;
+        }
+      }
+    } catch (e) {
+      console.warn('[ReviewAgent] DeepSeek-R1 failed:', (e as Error).message);
+    }
+  }
+
+  // 降级到 GLM-Z1
+  const z1Key = getReasoningFallbackApiKey();
+  if (z1Key) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+      const response = await fetch(REASONING_FALLBACK_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${z1Key}` },
+        body: JSON.stringify({
+          model: REASONING_FALLBACK_MODEL,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          temperature: 0.3,
+          max_tokens: 2000,
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        const data = await response.json() as any;
+        const msg = data.choices?.[0]?.message;
+        const content = msg?.content?.trim();
+
+        if (content) {
+          return parseReviewJSON(content, agentAction, agentParams);
+        }
+      }
+    } catch (e) {
+      console.warn('[ReviewAgent] GLM-Z1 failed:', (e as Error).message);
+    }
+  }
+
+  return null;
+}
+
+/** 解析审核 JSON 结果 */
+function parseReviewJSON(content: string, fallbackAction: string, fallbackParams: Record<string, any>): ReviewResult {
+  try {
+    const jsonStr = content.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
+    const parsed = JSON.parse(jsonStr);
+
+    const passed = parsed.passed === true;
+    const confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0.5;
+    const explanation = parsed.explanation || '';
+
+    if (passed) {
+      return { passed: true, confidence, explanation, status: 'passed' };
+    }
+
+    const correctedAction = parsed.correctedAction || fallbackAction;
+    const correctedParams = parsed.correctedParams || fallbackParams;
+
+    console.log(`[ReviewAgent] ⚠️ Deviation detected by reasoning model!`);
+    console.log(`   Original: ${fallbackAction}`);
+    console.log(`   Corrected: ${correctedAction}`);
+    console.log(`   Reason: ${explanation}`);
+
+    return {
+      passed: false,
+      confidence,
+      explanation,
+      correctedAction,
+      correctedParams,
+      status: correctedAction !== fallbackAction ? 'corrected' : 'failed',
+    };
+  } catch {
+    return { passed: true, confidence: 0.5, explanation: '审核结果解析失败', status: 'passed' };
+  }
+}
+
+/**
  * 审核 Agent：检查 Agent 的理解是否与用户原意一致
  * 如果不一致，自动校对并返回修正后的结果
  */
@@ -156,6 +319,11 @@ export async function reviewUserIntent(
   agentParams: Record<string, any>,
   agentDescription: string,
 ): Promise<ReviewResult> {
+  // 优先使用推理模型审核（DeepSeek-R1 / GLM-Z1）
+  const reasoningResult = await reviewWithReasoning(userMessage, agentAction, agentParams, agentDescription);
+  if (reasoningResult) return reasoningResult;
+
+  // 推理模型不可用，降级到指令模型审核
   const apiKey = process.env.ZHIPU_API_KEY;
   if (!apiKey) {
     return {

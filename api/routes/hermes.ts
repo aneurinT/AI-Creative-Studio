@@ -7,13 +7,183 @@ import { reviewUserIntent, findMemoryMatch, recordMemory } from '../services/rev
 import { reviewVideoScript, reviewVideoParams, quickScoreVideoPrompt, reviewVideoFinal, analyzeFailure } from '../services/videoReviewAgent.js';
 import { retrievePromptTemplate, retrieveVisualStyle, buildRAGContext, semanticRAG, seedKnowledgeBase } from '../services/ragKnowledge.js';
 
-import { CHAT_MODEL, CHAT_API, getChatApiKey, CHAT_FALLBACK_MODEL, CHAT_FALLBACK_API, getChatFallbackApiKey } from '../services/llmConfig.js';
+import { CHAT_MODEL, CHAT_API, getChatApiKey, CHAT_FALLBACK_MODEL, CHAT_FALLBACK_API, getChatFallbackApiKey, REASONING_MODEL, REASONING_API, getReasoningApiKey, REASONING_FALLBACK_MODEL, REASONING_FALLBACK_API, getReasoningFallbackApiKey } from '../services/llmConfig.js';
 
 const HERMES_PYTHON_PATH = process.platform === 'win32' ? 'python' : 'python3';
 const HERMES_MODULE = 'hermes_cli.main';
 
 const execAsync = promisify(exec);
 const router = Router();
+
+let hermesReady: boolean | null = null;
+
+/** 异步检查 Hermes 是否可用（缓存结果 5 分钟） */
+async function checkHermesInstalled(): Promise<boolean> {
+  if (hermesReady !== null) return hermesReady;
+  try {
+    const { stdout } = await execAsync(
+      `"${HERMES_PYTHON_PATH}" -m ${HERMES_MODULE} version`,
+      { timeout: 10_000, windowsHide: true },
+    );
+    hermesReady = stdout.includes('Hermes Agent');
+    return hermesReady;
+  } catch {
+    hermesReady = false;
+    return false;
+  }
+}
+
+/**
+ * 调用推理模型进行深度意图分析（DeepSeek-R1 优先，GLM-Z1 降级）
+ * 推理模型会自动进行 chain-of-thought 思考，分析用户真实意图
+ * 返回 { action, params, response, reasoning } 或 null（失败时回退到指令模型）
+ */
+async function callReasoningLLM(message: string, history: any[]): Promise<{ action: string; params: Record<string, any>; response: string; reasoning: string } | null> {
+  // 先尝试 DeepSeek-R1（免费推理模型）
+  const r1Key = getReasoningApiKey();
+  if (r1Key) {
+    const result = await tryCallReasoningLLM(message, history, REASONING_API, r1Key, REASONING_MODEL, 'DeepSeek-R1');
+    if (result) return result;
+  }
+
+  // DeepSeek-R1 不可用，降级到智谱 GLM-Z1（免费推理模型）
+  const z1Key = getReasoningFallbackApiKey();
+  if (z1Key) {
+    console.log('[Reasoning] DeepSeek-R1 unavailable, falling back to GLM-Z1');
+    const result = await tryCallReasoningLLM(message, history, REASONING_FALLBACK_API, z1Key, REASONING_FALLBACK_MODEL, 'GLM-Z1');
+    if (result) return result;
+  }
+
+  console.warn('[Reasoning] All reasoning models unavailable');
+  return null;
+}
+
+async function tryCallReasoningLLM(
+  message: string,
+  history: any[],
+  apiUrl: string,
+  apiKey: string,
+  model: string,
+  provider: string,
+): Promise<{ action: string; params: Record<string, any>; response: string; reasoning: string } | null> {
+  const systemPrompt = `你是 AI 创意助手的推理核心，负责深度理解用户的创作需求。
+
+## 你的思考方式
+你需要逐步推理（chain-of-thought）来分析用户的真实意图：
+
+### 第0步：上下文关联分析（必须首先执行）
+**仔细检查对话历史中是否存在之前的创作任务。如果有，必须分析当前请求与之前任务的关系：**
+
+- 如果用户使用代词（"它"、"这个"、"那张图"、"刚才的视频"），说明用户指的是之前生成的作品，你必须从历史中找到对应的作品信息
+- 如果用户说"修改一下"、"调整"、"换个风格"、"让它...起来"，说明用户想修改之前的结果
+- 如果用户说"再生成一个"、"类似的"、"换个角度"，说明用户想要类似的新作品
+- 如果用户提到了与之前任务相同的主题/角色/场景，说明存在延续性关联
+- 如果历史中没有创作任务，或当前请求是全新的独立需求，则标注为"无关联"
+
+**关联分析结论格式（在 reasoning 中体现）：**
+- 有关联 → 明确指出关联的上一轮任务是什么（action类型、主题、关键参数）
+- 无关联 → 说明这是全新的独立请求
+
+### 第1步：语义理解
+- 用户说了什么？核心关键词是什么？
+- 如果第0步发现关联，用户说的"它/这个/那个"指代什么？
+- 用户的情绪和期望是什么？
+
+### 第2步：意图分类
+分析用户属于以下哪种意图：
+- **image**：生成图片/插画/海报/壁纸/头像
+- **video**：生成视频/短片/动画/广告片/宣传片
+- **modify-image**：修改已有图片（必须在第0步确认了关联的图片）
+- **modify-video**：修改已有视频（必须在第0步确认了关联的视频）
+- **remove-bg**：抠图/去背景
+- **compose**：图片合成/拼接
+- **general**：闲聊/问答/非创作类问题
+
+### 第3步：参数推理
+根据用户描述和上下文关联推理出具体参数：
+- prompt: 英文提示词，如果有关联，融入上一轮的作品特征（80-200词）
+- style: realistic/cinematic/anime/3d/illustration，如果用户说"换个风格"，要明确切换
+- duration: 视频时长（秒），默认10秒
+- size: 图片尺寸，默认1024x1024
+- contextFromPrevious: 如果有关联，填入上一轮的关键信息（主题/风格/角色等）
+
+### 第4步：输出决策
+基于以上推理，输出最终决策。
+
+## 输出格式（严格JSON，不要其他文字）
+{"action":"video","params":{"prompt":"提示词","style":"cinematic","duration":10,"contextFromPrevious":"上一轮生成了赛博朋克风格的猫"},"response":"基于上一轮的赛博朋克猫，现在生成..."}`;
+
+  try {
+    const response = await fetchWithTimeout(apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          ...history.slice(-5).map((m: any) => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.content })),
+          { role: 'user', content: message },
+        ],
+        temperature: 0.6,
+        max_tokens: 2000,
+      }),
+    }, 30000); // 推理模型需要更多时间思考
+
+    if (!response.ok) {
+      console.warn(`[${provider}] API failed: ${response.status}`);
+      return null;
+    }
+
+    const data = await response.json() as any;
+    const choice = data.choices?.[0];
+    const messageObj = choice?.message;
+
+    // 推理模型返回结构：reasoning_content + content
+    // DeepSeek-R1: message.reasoning_content + message.content
+    // GLM-Z1: message.reasoning_content + message.content
+    const reasoning = messageObj?.reasoning_content || choice?.reasoning_content || '';
+    const content = messageObj?.content?.trim();
+
+    if (!content) {
+      console.warn(`[${provider}] Empty content, reasoning was:`, reasoning?.substring(0, 200));
+      return null;
+    }
+
+    // 提取 JSON
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.warn(`[${provider}] No JSON in content:`, content?.substring(0, 200));
+      return null;
+    }
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    const action = (parsed.action || '').toLowerCase();
+    const validActions = ['image', 'video', 'modify-image', 'modify-video', 'remove-bg', 'compose', 'general'];
+    const mappedAction = validActions.find(a => action.includes(a)) || 'general';
+    const params = parsed.params || {};
+
+    // 基于推理结果自动生成有实质内容的分析总结
+    const analysisSummary = buildAnalysisSummary(mappedAction, params, reasoning);
+
+    console.log(`[${provider}] Intent: ${mappedAction} | Summary: ${analysisSummary.substring(0, 80)}`);
+    if (reasoning) {
+      console.log(`[${provider}] Reasoning: ${reasoning.substring(0, 200)}...`);
+    }
+
+    return {
+      action: mappedAction,
+      params,
+      response: analysisSummary,
+      reasoning,
+    };
+  } catch (error) {
+    console.warn(`[${provider}] Exception:`, (error as Error).message);
+    return null;
+  }
+}
 
 /**
  * 调用 LLM 进行意图识别（智谱优先，DeepSeek 降级）
@@ -49,22 +219,32 @@ async function tryCallLLM(
 ): Promise<{ action: string; params: Record<string, any>; response: string } | null> {
   const systemPrompt = `你是 AI 创意助手，负责理解用户创作需求并精准识别意图。
 
+## 重要：上下文关联（必须首先执行）
+先检查对话历史中是否有之前的创作任务：
+- 如果用户使用代词（"它"、"这个"、"刚才的"），说明指代历史中的作品 → 必须关联
+- 如果用户说"修改"、"调整"、"换个风格"、"让它..."，说明想修改之前的结果 → 必须关联
+- 如果用户说"再生成一个"、"类似的"，说明想要类似新作品 → 继承风格参数
+- 如果历史中无创作任务或当前是完全新需求 → 无需关联
+- 关联时，在 params 中加入 contextFromPrevious 字段，描述上一轮的内容
+
 ## Action 类型与识别规则
 
 ### image（图片生成）
 关键词：画、生成图、制作图片、画一张、画个、插画、海报、壁纸
-params: prompt, style, size(默认1024x1024)
+params: prompt, style, size(默认1024x1024), contextFromPrevious(如有)
 
 ### video（视频生成）  
 关键词：视频、片子、短片、动画、制作视频、生成视频、拍一个、广告片
 时长推断：用户说"15秒"→ duration:15 | "30秒"→ 30 | "1分钟"→ 60 | 没说→ 默认10
 style: 广告/宣传 → cinematic | 动漫/卡通 → anime | 写实 → realistic
+params: prompt, style, duration, contextFromPrevious(如有)
 
 ### modify-image / modify-video / remove-bg / compose / general
+修改类意图必须在 params 中带上 contextFromPrevious
 
 ## 输出格式（严格JSON，不要其他文字）
-{"action":"video","params":{"prompt":"提示词","style":"realistic","duration":10},"response":"正在生成..."}
-{"action":"image","params":{"prompt":"提示词","style":"anime","size":"1024x1024"},"response":"正在生成..."}
+{"action":"video","params":{"prompt":"提示词","style":"realistic","duration":10,"contextFromPrevious":"上一轮生成了...猫"},"response":"基于上一轮的猫，现在生成..."}
+{"action":"image","params":{"prompt":"提示词","style":"anime","size":"1024x1024","contextFromPrevious":"上一轮画了...风景"},"response":"基于上一轮的风景..."}
 {"action":"general","params":{"query":"提问"},"response":"回答"}`;
 
   try {
@@ -102,17 +282,96 @@ style: 广告/宣传 → cinematic | 动漫/卡通 → anime | 写实 → realis
     const action = (parsed.action || '').toLowerCase();
     const validActions = ['image', 'video', 'modify-image', 'modify-video', 'remove-bg', 'compose', 'general'];
     const mappedAction = validActions.find(a => action.includes(a)) || 'general';
+    const params = parsed.params || {};
 
     console.log(`[${provider}] Intent: ${mappedAction} | ${parsed.response?.substring(0, 50)}`);
 
     return {
       action: mappedAction,
-      params: parsed.params || {},
-      response: parsed.response || '我理解你的需求了，正在帮你处理...',
+      params,
+      response: buildAnalysisSummary(mappedAction, params, ''),
     };
   } catch (error) {
     console.warn(`[${provider}] Exception:`, (error as Error).message);
     return null;
+  }
+}
+
+/**
+ * 根据推理结果自动生成有实质内容的分析总结
+ * 替代原来敷衍的"我理解你的需求了，正在帮你处理..."
+ */
+function buildAnalysisSummary(action: string, params: Record<string, any>, reasoning: string): string {
+  const styleMap: Record<string, string> = {
+    realistic: '写实风格', anime: '动漫风格', cinematic: '电影感',
+    '3d': '3D风格', illustration: '插画风格', fantasy: '奇幻风格',
+    cyberpunk: '赛博朋克', 'oil-painting': '油画风格', cartoon: '卡通风格',
+  };
+
+  // 上下文关联信息
+  const contextInfo = params.contextFromPrevious
+    ? `\n🔗 **上下文关联：** 检测到与上一轮任务关联 → ${params.contextFromPrevious}`
+    : '\n🆕 **全新任务：** 未检测到与历史任务的关联';
+
+  switch (action) {
+    case 'video': {
+      const style = params.style ? (styleMap[params.style] || params.style) : '';
+      const duration = params.duration || '10';
+      const prompt = params.prompt || '';
+      const promptPreview = prompt.length > 60 ? prompt.substring(0, 60) + '...' : prompt;
+      const lines = [
+        `📹 **分析结果：视频生成**`,
+        `- 意图识别：用户想要生成一段视频`,
+        `- 时长：${duration} 秒`,
+      ];
+      if (style) lines.push(`- 风格：${style}`);
+      if (promptPreview) lines.push(`- 核心描述：${promptPreview}`);
+      lines.push(contextInfo);
+      lines.push(``);
+      lines.push(`接下来将由故事创作专家编写脚本，视频制作专家提取参数并生成视频。`);
+      return lines.join('\n');
+    }
+    case 'image': {
+      const style = params.style ? (styleMap[params.style] || params.style) : '';
+      const size = params.size || '1024x1024';
+      const prompt = params.prompt || '';
+      const promptPreview = prompt.length > 60 ? prompt.substring(0, 60) + '...' : prompt;
+      const lines = [
+        `🎨 **分析结果：图片生成**`,
+        `- 意图识别：用户想要生成图片`,
+        `- 尺寸：${size}`,
+      ];
+      if (style) lines.push(`- 风格：${style}`);
+      if (promptPreview) lines.push(`- 核心描述：${promptPreview}`);
+      lines.push(contextInfo);
+      lines.push(``);
+      lines.push(`接下来将由图像创作专家优化提示词并生成图片。`);
+      return lines.join('\n');
+    }
+    case 'modify-image': {
+      return `✏️ **分析结果：图片修改**\n- 意图识别：用户想要修改已有图片\n- 修改内容：${params.description || params.prompt || '根据用户描述进行修改'}\n\n接下来将根据修改需求重新生成图片。`;
+    }
+    case 'modify-video': {
+      return `✂️ **分析结果：视频修改**\n- 意图识别：用户想要修改已有视频\n- 修改类型：${params.modifyType || '根据用户描述进行修改'}\n\n接下来将根据修改需求调整视频。`;
+    }
+    case 'remove-bg': {
+      return `🖼️ **分析结果：智能抠图**\n- 意图识别：用户想要去除图片背景\n\n接下来将自动抠除背景，生成透明背景图片。`;
+    }
+    case 'compose': {
+      return `🎭 **分析结果：图片合成**\n- 意图识别：用户想要合成/拼接图片\n\n接下来将提取主体并合成到新背景中。`;
+    }
+    case 'general': {
+      // 通用问答：如果 reasoning 存在，提取关键信息
+      if (reasoning) {
+        const keyPoints = reasoning.split(/[。.；;]/).filter(s => s.trim().length > 5).slice(0, 3);
+        if (keyPoints.length > 0) {
+          return `💬 **分析结果：通用问答**\n\n${keyPoints.map(p => `- ${p.trim()}`).join('\n')}`;
+        }
+      }
+      return `💬 我理解你的问题，正在为你解答...`;
+    }
+    default:
+      return `已收到你的需求，正在帮你处理...`;
   }
 }
 
@@ -364,12 +623,30 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
     console.log(`[RAG] 来源: ${ragResult.source}, 模板: ${ragResult.template?.description || '无'}, 风格: ${ragResult.style?.name || '无'}`);
     const ragContext = buildRAGContext(message, ragResult.template, ragResult.style);
 
+    // 优先使用推理模型进行深度意图分析（DeepSeek-R1 / GLM-Z1）
+    const reasoningResult = await callReasoningLLM(message, history || []);
+    if (reasoningResult) {
+      if (ragResult.template) { reasoningResult.params.prompt = (reasoningResult.params.prompt || message) + ' | ' + ragResult.template.prompt.substring(0, 150); }
+      if (ragResult.style) { reasoningResult.params.style = ragResult.style.keywords[0] === '动漫' ? 'anime' : reasoningResult.params.style; }
+      if (ragContext) { reasoningResult.params.ragContext = ragContext; }
+      res.json({
+        success: true,
+        response: reasoningResult.response,
+        action: reasoningResult.action,
+        params: reasoningResult.params,
+        reasoning: reasoningResult.reasoning?.substring(0, 500), // 返回推理过程供前端展示
+        modelUsed: 'reasoning',
+      });
+      return;
+    }
+
+    // 推理模型不可用，降级到指令模型（glm-4-flash / deepseek-chat）
     const llmResult = await callLLM(message, history || []);
     if (llmResult) {
       if (ragResult.template) { llmResult.params.prompt = (llmResult.params.prompt || message) + ' | ' + ragResult.template.prompt.substring(0, 150); }
       if (ragResult.style) { llmResult.params.style = ragResult.style.keywords[0] === '动漫' ? 'anime' : llmResult.params.style; }
       if (ragContext) { llmResult.params.ragContext = ragContext; }
-      res.json({ success: true, response: llmResult.response, action: llmResult.action, params: llmResult.params });
+      res.json({ success: true, response: llmResult.response, action: llmResult.action, params: llmResult.params, modelUsed: 'instruction' });
       return;
     }
 
@@ -412,7 +689,7 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
           const fallbackResult = fallbackAnalyze(message);
           res.json({
             success: true,
-            response: '我理解你的需求了，正在帮你处理...',
+            response: buildAnalysisSummary(fallbackResult.action, fallbackResult.params, ''),
             action: fallbackResult.action,
             params: fallbackResult.params,
           });
@@ -422,7 +699,7 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
         const fallbackResult = fallbackAnalyze(message);
         res.json({
           success: true,
-          response: '我理解你的需求了，正在帮你处理...',
+          response: buildAnalysisSummary(fallbackResult.action, fallbackResult.params, ''),
           action: fallbackResult.action,
           params: fallbackResult.params,
         });
@@ -431,7 +708,7 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
       const fallbackResult = fallbackAnalyze(message);
       res.json({
         success: true,
-        response: '我理解你的需求了，正在帮你处理...',
+        response: buildAnalysisSummary(fallbackResult.action, fallbackResult.params, ''),
         action: fallbackResult.action,
         params: fallbackResult.params,
         agentReady: false,
@@ -442,7 +719,7 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
     const fallbackResult = fallbackAnalyze(req.body.message || '');
     res.json({
       success: true,
-      response: '我理解你的需求了，正在帮你处理...',
+      response: buildAnalysisSummary(fallbackResult.action, fallbackResult.params, ''),
       action: fallbackResult.action,
       params: fallbackResult.params,
     });
@@ -501,7 +778,7 @@ router.post('/chat-with-image', async (req: Request, res: Response): Promise<voi
     const fallback = fallbackAnalyze(req.body.message || '');
     res.json({
       success: true,
-      response: '我理解你的需求了，正在帮你处理...',
+      response: buildAnalysisSummary(fallback.action, fallback.params, ''),
       action: fallback.action,
       params: fallback.params,
     });

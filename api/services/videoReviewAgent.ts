@@ -4,9 +4,10 @@
  * 发现问题即刻返回警告，不留到最终失败
  */
 import { fetchWithTimeout } from './fetchUtils.js';
+import { REASONING_MODEL, REASONING_API, getReasoningApiKey, REASONING_FALLBACK_MODEL, REASONING_FALLBACK_API, getReasoningFallbackApiKey } from './llmConfig.js';
 
 const ZHIPU_API = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
-const REVIEW_MODEL = 'glm-4-flash'; // 智谱免费模型
+const REVIEW_MODEL = 'glm-4-flash'; // 智谱免费指令模型（降级使用）
 
 export interface VideoReviewResult {
   passed: boolean;
@@ -17,13 +18,34 @@ export interface VideoReviewResult {
 }
 
 /**
- * 审核视频脚本质量
+ * 审核视频脚本质量（优先使用推理模型）
  */
 export async function reviewVideoScript(
   userPrompt: string,
   script: string,
   duration: string,
 ): Promise<VideoReviewResult> {
+  // 优先使用推理模型
+  const reasoningResult = await reviewWithReasoningModel(
+    `你是视频脚本审核员，拥有丰富的影视制作经验。请逐步推理分析脚本质量。
+
+## 推理步骤
+1. **相关性分析**：脚本是否紧扣用户需求？有无偏离？
+2. **可生成性分析**：脚本描述是否足够视觉化？
+3. **完整度分析**：是否包含场景、角色、动作、运镜、光线/色调？
+4. **时长匹配**：场景总时长是否匹配 ${duration} 秒？
+5. **安全性分析**：是否包含暴力、色情、政治敏感内容？
+
+## 输出JSON
+{"passed":true,"level":"ok","message":"脚本质量良好","suggestions":[]}
+{"passed":false,"level":"warning","message":"存在问题","suggestions":["建议1","建议2"]}
+{"passed":false,"level":"error","message":"严重问题","suggestions":["必须修正的问题"]}`,
+    `用户需求: ${userPrompt}\n\n脚本内容: ${script.substring(0, 1000)}`,
+    '脚本审核',
+  );
+  if (reasoningResult) return reasoningResult;
+
+  // 降级到指令模型
   const apiKey = process.env.ZHIPU_API_KEY;
   if (!apiKey) {
     return { passed: true, level: 'ok', message: '无审核Key，跳过', suggestions: [], checkedAt: '脚本审核' };
@@ -102,12 +124,31 @@ export async function reviewVideoScript(
 }
 
 /**
- * 审核视频生成参数
+ * 审核视频生成参数（优先使用推理模型）
  */
 export async function reviewVideoParams(
   userPrompt: string,
   params: Record<string, any>,
 ): Promise<VideoReviewResult> {
+  // 优先使用推理模型
+  const reasoningResult = await reviewWithReasoningModel(
+    `你是视频参数审核员。请逐步推理分析参数质量：
+
+## 推理步骤
+1. **prompt 质量**：是否英文？是否包含视觉元素（场景+主体+光线+运镜）？长度是否50-300词？
+2. **style 匹配**：风格是否匹配用户描述？
+3. **duration 合理**：时长是否在 API 支持范围（5-90秒）？
+4. **参数完整**：prompt, style, duration 三个必须都有
+
+## 输出JSON
+{"passed":true,"level":"ok","message":"参数配置正确"}
+{"passed":false,"level":"warning","message":"存在问题","suggestions":["建议"]}`,
+    `用户需求: ${userPrompt}\n\n生成参数: ${JSON.stringify(params)}`,
+    '参数审核',
+  );
+  if (reasoningResult) return reasoningResult;
+
+  // 降级到指令模型
   const apiKey = process.env.ZHIPU_API_KEY;
   if (!apiKey) {
     return { passed: true, level: 'ok', message: '无审核Key', suggestions: [], checkedAt: '参数审核' };
@@ -297,9 +338,13 @@ export async function analyzeFailure(
   duration: string,
   engine: string,
 ): Promise<{ reason: string; suggestions: string[]; retryable: boolean }> {
+  // 优先使用推理模型进行故障诊断
+  const reasoningResult = await analyzeFailureWithReasoning(errorMsg, userPrompt, style, duration, engine);
+  if (reasoningResult) return reasoningResult;
+
+  // 降级到指令模型
   const apiKey = process.env.ZHIPU_API_KEY;
   if (!apiKey) {
-    // 无 API Key 时用本地规则分析
     return localFailureAnalysis(errorMsg, engine);
   }
 
@@ -451,4 +496,164 @@ function localFailureAnalysis(errorMsg: string, engine: string): { reason: strin
     suggestions: ['请稍后重试', '切换其他视频引擎', '修改 prompt 后重新尝试'],
     retryable: true,
   };
+}
+
+// ============================================================
+// 推理模型辅助函数
+// ============================================================
+
+/** 通用推理模型审核（用于视频脚本审核、参数审核等） */
+async function reviewWithReasoningModel(
+  systemPrompt: string,
+  userContent: string,
+  checkedAt: string,
+): Promise<VideoReviewResult | null> {
+  const r1Key = getReasoningApiKey();
+  if (!r1Key && !getReasoningFallbackApiKey()) return null;
+
+  const tryProvider = async (apiUrl: string, apiKey: string, model: string, provider: string) => {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+      const response = await fetchWithTimeout(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userContent },
+          ],
+          temperature: 0.2,
+          max_tokens: 1500,
+        }),
+        signal: controller.signal,
+      }, 30000);
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) return null;
+
+      const data = await response.json() as any;
+      const msg = data.choices?.[0]?.message;
+      const reasoning = msg?.reasoning_content || '';
+      const content = msg?.content?.trim();
+
+      if (!content) return null;
+      if (reasoning) {
+        console.log(`[VideoReview-${provider}] Reasoning: ${reasoning.substring(0, 200)}...`);
+      }
+
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return null;
+
+      const result = JSON.parse(jsonMatch[0]);
+      return {
+        passed: result.passed !== false,
+        level: result.level || (result.passed ? 'ok' : 'warning'),
+        message: result.message || '',
+        suggestions: result.suggestions || [],
+        checkedAt,
+      };
+    } catch (e) {
+      console.warn(`[VideoReview-${provider}] Failed:`, (e as Error).message);
+      return null;
+    }
+  };
+
+  // DeepSeek-R1
+  if (r1Key) {
+    const result = await tryProvider(REASONING_API, r1Key, REASONING_MODEL, 'DeepSeek-R1');
+    if (result) return result;
+  }
+
+  // GLM-Z1
+  const z1Key = getReasoningFallbackApiKey();
+  if (z1Key) {
+    const result = await tryProvider(REASONING_FALLBACK_API, z1Key, REASONING_FALLBACK_MODEL, 'GLM-Z1');
+    if (result) return result;
+  }
+
+  return null;
+}
+
+/** 推理模型故障诊断 */
+async function analyzeFailureWithReasoning(
+  errorMsg: string,
+  userPrompt: string,
+  style: string,
+  duration: string,
+  engine: string,
+): Promise<{ reason: string; suggestions: string[]; retryable: boolean } | null> {
+  const r1Key = getReasoningApiKey();
+  if (!r1Key && !getReasoningFallbackApiKey()) return null;
+
+  const systemPrompt = `你是视频生成故障诊断专家。请逐步推理分析失败原因：
+
+## 推理步骤
+1. **错误分类**：分析错误信息属于哪类（API配置/额度/网络/超时/限流/模型不可用）
+2. **根因分析**：根据用户需求（${userPrompt}，风格${style}，时长${duration}秒）和引擎${engine}，推断根本原因
+3. **可重试判断**：临时错误（网络/超时/限流）=可重试；永久错误（配置/额度）=不可重试
+4. **建议生成**：给出2-3条可操作建议
+
+## 输出JSON
+{"reason":"简短原因","suggestions":["建议1","建议2"],"retryable":true}`;
+
+  const tryProvider = async (apiUrl: string, apiKey: string, model: string) => {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+      const response = await fetchWithTimeout(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: `错误信息: ${errorMsg}\n引擎: ${engine}` },
+          ],
+          temperature: 0.1,
+          max_tokens: 1000,
+        }),
+        signal: controller.signal,
+      }, 30000);
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) return null;
+
+      const data = await response.json() as any;
+      const content = data.choices?.[0]?.message?.content?.trim();
+      if (!content) return null;
+
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return null;
+
+      const result = JSON.parse(jsonMatch[0]);
+      return {
+        reason: result.reason || errorMsg,
+        suggestions: result.suggestions || ['请稍后重试或切换其他视频引擎'],
+        retryable: result.retryable !== false,
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  // DeepSeek-R1
+  if (r1Key) {
+    const result = await tryProvider(REASONING_API, r1Key, REASONING_MODEL);
+    if (result) return result;
+  }
+
+  // GLM-Z1
+  const z1Key = getReasoningFallbackApiKey();
+  if (z1Key) {
+    const result = await tryProvider(REASONING_FALLBACK_API, z1Key, REASONING_FALLBACK_MODEL);
+    if (result) return result;
+  }
+
+  return null;
 }

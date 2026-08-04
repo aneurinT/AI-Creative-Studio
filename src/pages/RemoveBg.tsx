@@ -1,6 +1,26 @@
 import { useState, useRef, useEffect } from 'react';
-import { Upload, Download, RefreshCw, Image as ImageIcon, Wand2, Loader2 } from 'lucide-react';
+import { Upload, Download, RefreshCw, Image as ImageIcon, Wand2, Loader2, FileText, Copy, Check, ChevronDown, ChevronUp, Table, Code } from 'lucide-react';
 import Navbar from '@/components/Navbar';
+
+interface OcrTable {
+  caption?: string;
+  headers: string[];
+  rows: string[][];
+  position?: string;
+}
+
+interface OcrResult {
+  hasText: boolean;
+  language?: string;
+  title?: string;
+  content?: string;
+  fullText?: string;
+  textBlocks?: Array<{ position: string; type: string; text: string }>;
+  tables?: OcrTable[];
+  totalChars?: number;
+  summary?: string;
+  message?: string;
+}
 
 export default function RemoveBg() {
   const [originalImage, setOriginalImage] = useState<string | null>(null);
@@ -10,6 +30,14 @@ export default function RemoveBg() {
   const [fillProgress, setFillProgress] = useState(0);
   const [fillStats, setFillStats] = useState({ total: 0, filled: 0, rate: 0 });
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // OCR 文字识别状态
+  const [isOcrProcessing, setIsOcrProcessing] = useState(false);
+  const [ocrResult, setOcrResult] = useState<OcrResult | null>(null);
+  const [showOcrResult, setShowOcrResult] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [ocrViewMode, setOcrViewMode] = useState<'preview' | 'json' | 'table'>('preview');
+  const [expandedTables, setExpandedTables] = useState<Set<number>>(new Set());
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -160,6 +188,51 @@ export default function RemoveBg() {
     fileInputRef.current?.click();
   };
 
+  // OCR 文字识别
+  const handleOcr = async () => {
+    if (!originalImage) return;
+    setIsOcrProcessing(true);
+    setOcrResult(null);
+    setShowOcrResult(true);
+
+    console.log('[OCR] 开始识别图片中的文字...');
+
+    try {
+      const response = await fetch('/api/ocr/recognize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageUrl: originalImage }),
+      });
+
+      const data = await response.json();
+
+      if (data.success && data.result) {
+        console.log('[OCR] 识别成功:', data.result.summary || `${data.result.totalChars || 0} 个字符`);
+        setOcrResult(data.result);
+      } else {
+        setError(data.error || 'OCR 识别失败');
+        console.error('[OCR] 识别失败:', data.error);
+      }
+    } catch (err) {
+      setError('OCR 服务请求失败，请检查网络');
+      console.error('[OCR] 网络错误:', err);
+    } finally {
+      setIsOcrProcessing(false);
+    }
+  };
+
+  const handleCopyOcrResult = async () => {
+    const text = ocrResult?.fullText || ocrResult?.content;
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // fallback
+    }
+  };
+
   useEffect(() => {
     return () => {
       if (originalImage && originalImage.startsWith('blob:')) {
@@ -224,31 +297,334 @@ export default function RemoveBg() {
             )}
 
             {originalImage && (
-              <button
-                onClick={handleRemoveBg}
-                disabled={isProcessing}
-                className={`w-full mt-4 py-3 rounded-xl font-semibold text-white flex items-center justify-center gap-2 transition-all ${isProcessing
-                  ? 'bg-gray-400 cursor-not-allowed'
-                  : 'bg-gradient-to-r from-indigo-500 to-purple-500 hover:shadow-lg'
-                  }`}
-              >
-                {isProcessing ? (
-                  <>
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                    AI 处理中...
-                  </>
-                ) : (
-                  <>
-                    <Wand2 className="w-5 h-5" />
-                    一键抠图
-                  </>
-                )}
-              </button>
+              <div className="space-y-3">
+                <button
+                  onClick={handleRemoveBg}
+                  disabled={isProcessing}
+                  className={`w-full py-3 rounded-xl font-semibold text-white flex items-center justify-center gap-2 transition-all ${isProcessing
+                    ? 'bg-gray-400 cursor-not-allowed'
+                    : 'bg-gradient-to-r from-indigo-500 to-purple-500 hover:shadow-lg'
+                    }`}
+                >
+                  {isProcessing ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      AI 处理中...
+                    </>
+                  ) : (
+                    <>
+                      <Wand2 className="w-5 h-5" />
+                      一键抠图
+                    </>
+                  )}
+                </button>
+
+                <button
+                  onClick={handleOcr}
+                  disabled={isOcrProcessing}
+                  className={`w-full py-3 rounded-xl font-semibold flex items-center justify-center gap-2 transition-all border-2 ${isOcrProcessing
+                    ? 'border-gray-300 bg-gray-100 text-gray-400 cursor-not-allowed'
+                    : 'border-amber-400 bg-amber-50 text-amber-700 hover:bg-amber-100 hover:border-amber-500'
+                    }`}
+                >
+                  {isOcrProcessing ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      正在识别文字...
+                    </>
+                  ) : (
+                    <>
+                      <FileText className="w-5 h-5" />
+                      识别图片文字 (OCR)
+                    </>
+                  )}
+                </button>
+              </div>
             )}
 
             {error && (
               <div className="mt-4 px-4 py-3 bg-red-50 text-red-600 rounded-xl text-sm">
                 {error}
+              </div>
+            )}
+
+            {/* OCR 文字识别结果 */}
+            {showOcrResult && (
+              <div className="mt-6 border-t border-gray-200 pt-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-lg font-semibold text-gray-700 flex items-center gap-2">
+                    <FileText className="w-5 h-5 text-amber-500" />
+                    OCR 文字识别结果
+                    <span className="text-xs text-gray-400 font-normal">glm-4v-flash</span>
+                  </h3>
+                  {/* 视图切换 */}
+                  {ocrResult && !isOcrProcessing && (
+                    <div className="flex bg-gray-100 rounded-lg p-0.5">
+                      <button
+                        onClick={() => setOcrViewMode('preview')}
+                        className={`px-3 py-1 text-xs rounded-md transition-colors ${ocrViewMode === 'preview' ? 'bg-white shadow text-gray-800 font-medium' : 'text-gray-500 hover:text-gray-700'}`}
+                      >
+                        📄 预览
+                      </button>
+                      <button
+                        onClick={() => setOcrViewMode('table')}
+                        className={`px-3 py-1 text-xs rounded-md transition-colors ${ocrViewMode === 'table' ? 'bg-white shadow text-gray-800 font-medium' : 'text-gray-500 hover:text-gray-700'}`}
+                      >
+                        <Table className="w-3 h-3 inline mr-1" />
+                        表格
+                      </button>
+                      <button
+                        onClick={() => setOcrViewMode('json')}
+                        className={`px-3 py-1 text-xs rounded-md transition-colors ${ocrViewMode === 'json' ? 'bg-white shadow text-gray-800 font-medium' : 'text-gray-500 hover:text-gray-700'}`}
+                      >
+                        <Code className="w-3 h-3 inline mr-1" />
+                        JSON
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {isOcrProcessing ? (
+                  <div className="flex items-center justify-center py-8">
+                    <Loader2 className="w-6 h-6 animate-spin text-amber-500 mr-2" />
+                    <span className="text-gray-500">glm-4v-flash 正在识别图片文字...</span>
+                  </div>
+                ) : ocrResult ? (
+                  <div className="space-y-3">
+                    {/* 识别摘要 */}
+                    <div className="flex flex-wrap gap-3">
+                      {ocrResult.hasText !== false && (
+                        <>
+                          <span className="px-2 py-1 bg-green-100 text-green-700 rounded text-xs font-medium">
+                            ✅ 已识别文字
+                          </span>
+                          {ocrResult.language && (
+                            <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs">
+                              语言：{ocrResult.language}
+                            </span>
+                          )}
+                          {ocrResult.totalChars != null && ocrResult.totalChars > 0 && (
+                            <span className="px-2 py-1 bg-purple-100 text-purple-700 rounded text-xs">
+                              共 {ocrResult.totalChars.toLocaleString()} 字符
+                            </span>
+                          )}
+                          {ocrResult.tables && ocrResult.tables.length > 0 && (
+                            <span className="px-2 py-1 bg-cyan-100 text-cyan-700 rounded text-xs">
+                              {ocrResult.tables.length} 个表格
+                            </span>
+                          )}
+                          {ocrResult.summary && (
+                            <span className="px-2 py-1 bg-amber-100 text-amber-700 rounded text-xs">
+                              {ocrResult.summary}
+                            </span>
+                          )}
+                        </>
+                      )}
+                      {ocrResult.hasText === false && (
+                        <span className="px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs">
+                          ⚠️ 未检测到文字
+                        </span>
+                      )}
+                    </div>
+
+                    {/* 标题 */}
+                    {ocrResult.title && (
+                      <h4 className="text-base font-bold text-gray-800">{ocrResult.title}</h4>
+                    )}
+
+                    {/* === 表格视图 === */}
+                    {ocrViewMode === 'table' && (
+                      <div className="space-y-4">
+                        {/* 提取的表格 */}
+                        {ocrResult.tables && ocrResult.tables.length > 0 ? (
+                          ocrResult.tables.map((table, tIdx) => (
+                            <div key={tIdx} className="border border-gray-200 rounded-lg overflow-hidden">
+                              <button
+                                onClick={() => {
+                                  const next = new Set(expandedTables);
+                                  expandedTables.has(tIdx) ? next.delete(tIdx) : next.add(tIdx);
+                                  setExpandedTables(next);
+                                }}
+                                className="w-full flex items-center justify-between px-4 py-2 bg-gray-50 hover:bg-gray-100 transition-colors"
+                              >
+                                <span className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                                  <Table className="w-4 h-4 text-cyan-500" />
+                                  {table.caption || `表格 ${tIdx + 1}`}
+                                </span>
+                                <span className="flex items-center gap-2 text-xs text-gray-400">
+                                  {table.position && <span>{table.position}</span>}
+                                  {expandedTables.has(tIdx) ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                                </span>
+                              </button>
+                              {expandedTables.has(tIdx) && (
+                                <div className="overflow-x-auto">
+                                  <table className="w-full text-sm">
+                                    <thead>
+                                      <tr className="bg-cyan-50">
+                                        {table.headers.map((h, hIdx) => (
+                                          <th key={hIdx} className="px-4 py-2 text-left text-xs font-semibold text-cyan-800 border-b border-cyan-100">
+                                            {h}
+                                          </th>
+                                        ))}
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {table.rows.map((row, rIdx) => (
+                                        <tr key={rIdx} className={rIdx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                                          {row.map((cell, cIdx) => (
+                                            <td key={cIdx} className="px-4 py-2 text-xs text-gray-600 border-b border-gray-100">
+                                              {cell}
+                                            </td>
+                                          ))}
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              )}
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-sm text-gray-400 text-center py-4">未检测到表格数据</p>
+                        )}
+
+                        {/* 文字块列表（表格视图下也显示） */}
+                        {ocrResult.textBlocks && ocrResult.textBlocks.length > 0 && (
+                          <div className="space-y-1">
+                            <p className="text-xs text-gray-500 font-medium mb-2">文字块分布：</p>
+                            {ocrResult.textBlocks.map((block, i) => (
+                              <div key={i} className="flex items-start gap-2 text-xs py-1.5 px-3 bg-gray-50 rounded">
+                                <span className="px-1.5 py-0.5 bg-gray-200 rounded text-gray-500 font-mono shrink-0">
+                                  {block.position}
+                                </span>
+                                <span className="px-1.5 py-0.5 bg-gray-200 rounded text-gray-500 shrink-0 text-[10px]">
+                                  {block.type}
+                                </span>
+                                <span className="text-gray-600">{block.text}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* === JSON 视图 === */}
+                    {ocrViewMode === 'json' && (
+                      <div className="relative">
+                        <div className="p-4 bg-gray-900 rounded-lg max-h-96 overflow-y-auto">
+                          <pre className="text-xs text-green-400 font-mono leading-relaxed whitespace-pre-wrap">
+                            {JSON.stringify(ocrResult, null, 2)}
+                          </pre>
+                        </div>
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(JSON.stringify(ocrResult, null, 2));
+                            setCopied(true);
+                            setTimeout(() => setCopied(false), 2000);
+                          }}
+                          className="absolute top-2 right-2 p-2 bg-gray-800 border border-gray-700 rounded-lg hover:bg-gray-700 transition-colors"
+                          title="复制 JSON"
+                        >
+                          {copied ? (
+                            <Check className="w-4 h-4 text-green-400" />
+                          ) : (
+                            <Copy className="w-4 h-4 text-gray-400" />
+                          )}
+                        </button>
+                      </div>
+                    )}
+
+                    {/* === 预览视图（默认） === */}
+                    {ocrViewMode === 'preview' && (
+                      <>
+                        {/* 表格预览卡片 */}
+                        {ocrResult.tables && ocrResult.tables.length > 0 && (
+                          <div className="space-y-2">
+                            {ocrResult.tables.map((table, tIdx) => (
+                              <div key={tIdx} className="border border-gray-200 rounded-lg overflow-hidden">
+                                <div className="overflow-x-auto">
+                                  <table className="w-full text-sm">
+                                    <thead>
+                                      <tr className="bg-gray-50">
+                                        {table.headers.map((h, hIdx) => (
+                                          <th key={hIdx} className="px-3 py-2 text-left text-xs font-semibold text-gray-700 border-b">
+                                            {h}
+                                          </th>
+                                        ))}
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {table.rows.slice(0, 5).map((row, rIdx) => (
+                                        <tr key={rIdx}>
+                                          {row.map((cell, cIdx) => (
+                                            <td key={cIdx} className="px-3 py-1.5 text-xs text-gray-600 border-b border-gray-50">
+                                              {cell}
+                                            </td>
+                                          ))}
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                                {table.rows.length > 5 && (
+                                  <div className="px-3 py-1.5 text-xs text-gray-400 bg-gray-50 text-center">
+                                    还有 {table.rows.length - 5} 行...（切换到"表格"视图查看完整内容）
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* 完整文本内容 */}
+                        {(ocrResult.fullText || ocrResult.content) && (
+                          <div className="relative">
+                            <div className="p-4 bg-white border border-gray-200 rounded-lg max-h-80 overflow-y-auto">
+                              <pre className="text-sm text-gray-700 whitespace-pre-wrap font-sans leading-relaxed">
+                                {ocrResult.fullText || ocrResult.content}
+                              </pre>
+                            </div>
+                            <button
+                              onClick={handleCopyOcrResult}
+                              className="absolute top-2 right-2 p-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+                              title="复制文档"
+                            >
+                              {copied ? (
+                                <Check className="w-4 h-4 text-green-500" />
+                              ) : (
+                                <Copy className="w-4 h-4 text-gray-400" />
+                              )}
+                            </button>
+                          </div>
+                        )}
+
+                        {/* 文字块列表 */}
+                        {ocrResult.textBlocks && ocrResult.textBlocks.length > 0 && (
+                          <div className="space-y-1">
+                            <p className="text-xs text-gray-500 font-medium">文字分布：</p>
+                            {ocrResult.textBlocks.map((block, i) => (
+                              <div key={i} className="flex items-start gap-2 text-xs py-1.5 px-3 bg-gray-50 rounded">
+                                <span className="px-1.5 py-0.5 bg-gray-200 rounded text-gray-500 font-mono shrink-0">
+                                  {block.position}
+                                </span>
+                                <span className="px-1.5 py-0.5 bg-gray-200 rounded text-gray-500 shrink-0 text-[10px]">
+                                  {block.type}
+                                </span>
+                                <span className="text-gray-600">{block.text}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    {!ocrResult.hasText && ocrResult.message && (
+                      <p className="text-sm text-gray-500 italic">{ocrResult.message}</p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-400 text-center py-4">暂无识别结果</p>
+                )}
               </div>
             )}
           </div>

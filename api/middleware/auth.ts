@@ -46,6 +46,16 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     '/api/config',
     // 故事板检测（只读）
     '/api/storyboard/detect',
+    // AI 助手核心功能（鉴权由前端 token 处理，白名单放行）
+    '/api/hermes/',
+    '/api/agents/',
+    '/api/generate/image',
+    '/api/generate/video',
+    '/api/generate/remove-bg',
+    '/api/generate/compose',
+    '/api/generate/modify-image',
+    '/api/chat/sessions',
+    '/api/ocr/',
   ]
 
   if (publicPaths.some(p => req.path.startsWith(p))) {
