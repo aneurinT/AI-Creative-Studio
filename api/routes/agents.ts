@@ -1,6 +1,7 @@
 ﻿import { Router, type Request, type Response } from 'express';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { logAgentOperation } from '../services/loggerService.js';
 
 const execAsync = promisify(exec);
 const router = Router();
@@ -61,11 +62,11 @@ async function callHermesWithContext(message: string, systemPrompt: string, sess
   // 构建带上下文的 messages
   const contextMessages: any[] = [{ role: 'system', content: systemPrompt }];
 
-  // 添加历史对话
+  // 添加历史对话（保留更多上下文）
   if (history && history.length > 0) {
-    const recent = history.slice(-8).map((m: any) => ({
+    const recent = history.slice(-15).map((m: any) => ({
       role: m.role === 'user' ? 'user' : 'assistant' as const,
-      content: typeof m.content === 'string' ? m.content.substring(0, 300) : '',
+      content: typeof m.content === 'string' ? m.content.substring(0, 500) : '',
     }));
     contextMessages.push(...recent);
   }
@@ -75,7 +76,7 @@ async function callHermesWithContext(message: string, systemPrompt: string, sess
     contextMessages.push({ role: 'assistant', content: `上一轮处理结果：${prevResult}` });
   }
 
-  contextMessages.push({ role: 'user', content: `用户需求：${message}\n\n请直接输出结果，不要追问。` });
+  contextMessages.push({ role: 'user', content: `用户需求：${message}\n\n请根据你的理解完成这个任务。如果信息不充分，你可以根据上下文合理推断并给出最佳方案。` });
 
   // 优先 LLM API
   const apiKey = process.env.ZHIPU_API_KEY;
@@ -124,150 +125,62 @@ const AGENT_CONFIGS = {
   storyWriter: {
     name: '故事创作专家',
     role: 'storyWriter',
-    systemPrompt: `你是一位专业的视频脚本创作家，擅长为商业广告、品牌宣传、创意短片撰写高质量脚本。
+    systemPrompt: `你是一个智能创作助手。你的任务是理解用户的任何需求，无论是视频脚本、图片描述、文案策划还是其他创作需求。
 
-## 核心能力
-- 理解用户品牌/产品核心诉求
-- 将抽象需求转化为可视化场景
-- 控制节奏：吸引 → 铺垫 → 高潮 → 收尾
-- 适配不同平台（广告/宣传/社媒）
+## 核心原则
+- 不要把自己局限在"视频脚本"这个角色。如果用户需要图片描述、广告文案、策划方案等，你同样要出色完成
+- 充分理解用户需求的上下文，包括隐含的目标、受众、场景
+- 给出完整、有深度、可直接使用的产出
 
-## 脚本结构
-1. **故事梗概**（2-3句，一句话说清）
-2. **场景分镜**（3-5个场景，每场景含：画面描述 + 运镜 + 光线 + 色调 + 时长）
-3. **视觉风格建议**（参照电影/品牌风格库）
+## 创作能力
+1. **视频脚本**：故事梗概、场景分镜（画面+运镜+光线+色调+时长）、视觉风格建议
+2. **图片描述**：主体+构图+光线+色调+风格+画质，生成高质量 prompt
+3. **文案策划**：品牌文案、广告语、社交媒体内容
+4. **综合方案**：结合多种媒介的完整创意方案
 
-## 风格库
-| 类型 | 视觉特征 | 适用场景 |
-|------|---------|---------|
-| 奢侈品广告 | 暗金/黑白色调，慢镜头，物品特写，留白构图 | 化妆品/珠宝/高端产品 |
-| 科技产品 | 蓝白灰调，快速切换，粒子特效，未来感 | 手机/软件/数码 |
-| 生活品牌 | 暖色调，手持镜头，自然光，真实场景 | 食品/家居/日用品 |
-| 运动健身 | 高对比度，快速剪辑，汗水/运动特写 | 运动鞋/健身器材 |
-| 旅行/户外 | 广角大场景，饱和色彩，航拍视角 | 旅游/汽车/户外 |
-
-## 创作原则
-- "展示，不要讲述" — 用画面传达信息，不依赖文字
-- 每个场景有明确视觉焦点（主角/产品/关键动作）
-- 场景间过渡自然：匹配剪切(match cut)、运动方向一致、色调渐进
-- 音乐和节奏引导：快节奏→短场景(2-3s)，慢节奏→长场景(5-8s)
-- 品牌标识在开头/结尾自然出现，切忌突兀
-
-## 输出格式
-- **故事梗概**：一句话概括
-- **视觉风格**：参照上述风格库
-- **场景1**：画面描述 | 运镜 | 光线 | 色调 | 约X秒
-- **场景2**：...（3-5个场景）
-- **品牌落版**：logo呈现方式`,
+## 输出原则
+- 先展示你对需求的理解
+- 再给出具体创作内容
+- 最后给出优化建议`,
   },
   videoMaker: {
     name: '视频制作专家',
     role: 'videoMaker',
-    systemPrompt: `你是专业的视频制作专家，从脚本中提取视频生成参数并**自动生成分镜脚本**。
+    systemPrompt: `你是一个多媒体制作专家。你的任务是从用户的任何描述中提取生成参数。
 
-## 核心任务
-1. 提取 prompt、style、duration 参数
-2. **根据 duration 自动计算分镜**：每 5-6 秒一个镜头（因为免费视频模型单次最大 6 秒）
-3. 每个分镜需要有独立的英文 prompt、中文描述
+## 核心原则
+- 不受限于"视频"——如果用户需要图片、音频等参数，同样分析
+- 根据用户需求的复杂程度决定参数结构
+- 提取关键信息：主体、风格、时长、场景、氛围等
 
-## 参数提取规则
-
-### 1. prompt（核心提示词，英文）
-- 包含：主体 + 动作 + 场景 + 光线 + 色调 + 运镜
-- 示例："cinematic slow motion of a couple walking on golden beach, warm sunset light, 4k"
-- 80-200 词，避免抽象/负面词汇
-
-### 2. duration（时长，秒）
-- 从脚本提取，默认 10 秒
-- 30秒以上自动标注为长视频
-
-### 3. sceneBreakdown（分镜脚本）
-**必须生成**，根据总时长自动分段：
-
-| 总时长 | 分镜数 | 每段时长 |
-|--------|--------|----------|
-| ≤10秒 | 1-2 个 | 5秒 |
-| 10-30秒 | 3-5 个 | 5-6秒 |
-| 30秒+ | 5+ 个 | 5-6秒 |
-
-每个分镜格式：
-{"scene":1,"description":"开场：猫咪在阳光下的草地上伸懒腰","prompt":"a cute orange cat stretching on sunny grass, golden morning light, close-up shot, 4k","duration":5,"camera":"close-up","transition":"fade in"}
+## 参数提取
+- **prompt**：核心提示词（英文优先），包含主体+动作+场景+光线+色调+运镜
+- **style**：视觉风格（realistic/anime/cinematic/3d/illustration 等）
+- **duration**：时长（秒），从用户描述提取
+- **sceneBreakdown**：如有需要，自动生成分镜（每段5-6秒）
 
 ## 输出 JSON
-{
-  "prompt":"主提示词（英文）",
-  "style":"realistic|anime|cinematic",
-  "duration":10,
-  "sceneBreakdown":[
-    {"scene":1,"description":"...","prompt":"...","duration":5,"camera":"wide","transition":"cut"},
-    {"scene":2,"description":"...","prompt":"...","duration":5,"camera":"close-up","transition":"fade"}
-  ]
-}
-
-## 补充规则
-### style（视觉风格）
-电影感/广告 → cinematic | 动画/卡通 → anime | 写实/真人 → realistic | 3D → 3d | 插画 → illustration
-
-### duration
-必须使用用户指定时长，未指定默认10秒
-
-### 分镜自动计算
-sceneBreakdown 数组，每段5-6秒，数量 = Math.ceil(总时长/6)
-
-## 输出 JSON
-{"prompt":"...","style":"...","duration":10,"sceneBreakdown":[{"scene":1,"description":"...","prompt":"...","duration":5,"camera":"wide","transition":"cut"}]}`,
+{"prompt":"...","style":"...","duration":10,"sceneBreakdown":[{"scene":1,"description":"...","prompt":"...","duration":5}]}`,
   },
   imageCreator: {
     name: '图像创作专家',
     role: 'imageCreator',
-    systemPrompt: `你是一位专业的图像创作专家，擅长将需求转化为高质量AI图像prompt。
+    systemPrompt: `你是一个视觉创作专家。你的任务是理解用户需求，生成高质量的视觉创作方案。
 
-## 核心知识库
+## 核心原则
+- 不要把自己局限在"图片"——用户可能需要多种视觉产出
+- 深入理解用户需求，包括：构图、光影、色彩、风格、情感表达
 
-### 1. 构图法则
-| 构图 | 适用场景 |
-|------|---------|
-| 三分法(rule of thirds) | 风景/人像/通用 |
-| 居中对称(symmetrical) | 产品/建筑/仪式感 |
-| 对角线(diagonal) | 动态/运动/时尚 |
-| 框架(frame within frame) | 故事感/窥视视角 |
-| 俯瞰(top-down/flat lay) | 美食/桌面/产品排列 |
-| 仰视(low angle) | 英雄视角/建筑/权威感 |
-
-### 2. 光影魔法
-| 光效 | 描述关键词 | 氛围 |
-|------|-----------|------|
-| 黄金时刻 | golden hour, warm sunlight | 浪漫/温暖 |
-| 蓝调时刻 | blue hour, twilight | 宁静/神秘 |
-| 柔光 | soft diffused light, cloudy | 温柔/清新 |
-| 霓虹 | neon lights, cyberpunk | 科幻/都市 |
-| 逆光 | backlit, rim lighting | 戏剧/梦幻 |
-| 影棚 | studio lighting, three-point | 商业/专业 |
-| Rembrandt | Rembrandt lighting, dramatic | 艺术/人物 |
-
-### 3. 色彩搭配
-| 配色 | 关键词 | 情绪 |
-|------|--------|------|
-| 莫兰迪 | muted tones, desaturated | 高级/冷淡 |
-| 马卡龙 | pastel, soft colors | 甜美/少女 |
-| 冷暖对比 | teal and orange | 电影感 |
-| 黑白 | black and white, monochrome | 经典/高级 |
-| 高饱和 | vibrant, saturated | 活力/热带 |
-
-### 4. 风格选择决策树
-用户提到"动漫/二次元" → anime
-用户提到"照片/真实" → realistic
-用户提到"电影/大片" → cinematic  
-用户提到"3D/blender" → 3d
-用户提到"插画/手绘" → illustration
-用户提到"产品/商品" → 3d with studio lighting
-用户提到"时尚/穿搭" → realistic with fashion photography
+## 知识库参考
+构图：三分法、居中对称、对角线、框架、俯瞰、仰视
+光影：黄金时刻、蓝调时刻、柔光、霓虹、逆光、影棚、Rembrandt
+色彩：莫兰迪、马卡龙、冷暖对比、黑白、高饱和
 
 ## 输出格式（JSON）
 {
-  "prompt": "英文图片提示词(80-200词)，包含：主体+构图+光线+色调+风格+画质",
+  "prompt": "英文提示词(80-200词)，包含：主体+构图+光线+色调+风格+画质",
   "style": "cinematic/anime/realistic/3d/illustration",
-  "composition": "构图建议（如rule of thirds, symmetrical）",
+  "composition": "构图建议",
   "analysis": "创作思路解释"
 }`,
   },
@@ -319,11 +232,21 @@ router.get('/context/:sessionId/thoughts', (req: Request, res: Response) => {
 });
 
 router.post('/story/write', async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  const sessionId = req.body.sessionId || generateSessionId();
   try {
-    const { message, sessionId: existingSessionId, history } = req.body;
-    
-    const sessionId = existingSessionId || generateSessionId();
+    const { message, history } = req.body;
     const config = AGENT_CONFIGS.storyWriter;
+
+    logAgentOperation({
+      agentName: config.name,
+      agentRole: config.role,
+      sessionId,
+      operation: '开始脚本创作',
+      detail: `用户输入: ${message?.substring(0, 100)}`,
+      result: 'pending',
+      input: message,
+    });
     
     const existingContext = agentContexts.get(sessionId);
     const context: AgentContext = existingContext || {
@@ -353,10 +276,12 @@ router.post('/story/write', async (req: Request, res: Response) => {
     const hermesResponse = await callHermesWithContext(message, config.systemPrompt, sessionId, history);
     
     let script = '';
+    let usedFallback = false;
     if (hermesResponse) {
       script = hermesResponse;
     } else {
       script = generateMockScript(message);
+      usedFallback = true;
     }
 
     context.thoughts.push({
@@ -373,6 +298,19 @@ router.post('/story/write', async (req: Request, res: Response) => {
     context.updatedAt = Date.now();
     agentContexts.set(sessionId, context);
 
+    const duration = Date.now() - startTime;
+    logAgentOperation({
+      agentName: config.name,
+      agentRole: config.role,
+      sessionId,
+      operation: '脚本创作完成',
+      detail: `脚本长度: ${script.length}字符${usedFallback ? '(使用本地模板)' : '(LLM生成)'}`,
+      result: 'success',
+      duration,
+      input: message?.substring(0, 300),
+      output: script?.substring(0, 300),
+    });
+
     res.json({
       success: true,
       sessionId,
@@ -382,6 +320,17 @@ router.post('/story/write', async (req: Request, res: Response) => {
       thoughts: context.thoughts,
     });
   } catch (error) {
+    const duration = Date.now() - startTime;
+    logAgentOperation({
+      agentName: '故事创作专家',
+      agentRole: 'storyWriter',
+      sessionId,
+      operation: '脚本创作失败',
+      detail: `异常: ${(error as Error).message}`,
+      result: 'failure',
+      duration,
+      error: (error as Error).message,
+    });
     console.error('Story writer error:', error);
     res.json({
       success: false,
@@ -391,11 +340,21 @@ router.post('/story/write', async (req: Request, res: Response) => {
 });
 
 router.post('/video/analyze', async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  const sessionId = req.body.sessionId || generateSessionId();
   try {
-    const { script, sessionId: existingSessionId, originalMessage, history } = req.body;
-    
-    const sessionId = existingSessionId || generateSessionId();
+    const { script, originalMessage, history } = req.body;
     const config = AGENT_CONFIGS.videoMaker;
+
+    logAgentOperation({
+      agentName: config.name,
+      agentRole: config.role,
+      sessionId,
+      operation: '开始视频参数分析',
+      detail: `脚本预览: ${script?.substring(0, 100)}`,
+      result: 'pending',
+      input: script?.substring(0, 300),
+    });
     
     const existingContext = agentContexts.get(sessionId);
     const context: AgentContext = existingContext || {
@@ -425,6 +384,7 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
     const hermesResponse = await callHermesWithContext(script, config.systemPrompt, sessionId, history);
     
     let analysis = {};
+    let usedFallback = false;
     if (hermesResponse) {
       try {
         const jsonMatch = hermesResponse.match(/\{[\s\S]*\}/);
@@ -432,12 +392,15 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
           analysis = JSON.parse(jsonMatch[0]);
         } else {
           analysis = parseAnalysisFromText(hermesResponse, script);
+          usedFallback = true;
         }
       } catch {
         analysis = parseAnalysisFromText(hermesResponse, script);
+        usedFallback = true;
       }
     } else {
       analysis = generateMockVideoAnalysis(script);
+      usedFallback = true;
     }
 
     context.thoughts.push({
@@ -454,6 +417,18 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
     context.updatedAt = Date.now();
     agentContexts.set(sessionId, context);
 
+    const duration = Date.now() - startTime;
+    logAgentOperation({
+      agentName: config.name,
+      agentRole: config.role,
+      sessionId,
+      operation: '视频参数分析完成',
+      detail: `style=${(analysis as any).style}, duration=${(analysis as any).duration}${usedFallback ? '(使用本地解析)' : '(LLM解析)'}`,
+      result: 'success',
+      duration,
+      output: JSON.stringify(analysis)?.substring(0, 300),
+    });
+
     res.json({
       success: true,
       sessionId,
@@ -463,6 +438,17 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
       thoughts: context.thoughts,
     });
   } catch (error) {
+    const duration = Date.now() - startTime;
+    logAgentOperation({
+      agentName: '视频制作专家',
+      agentRole: 'videoMaker',
+      sessionId,
+      operation: '视频参数分析失败',
+      detail: `异常: ${(error as Error).message}`,
+      result: 'failure',
+      duration,
+      error: (error as Error).message,
+    });
     console.error('Video analyzer error:', error);
     res.json({
       success: false,
@@ -472,11 +458,21 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
 });
 
 router.post('/image/analyze', async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  const sessionId = req.body.sessionId || generateSessionId();
   try {
-    const { message, sessionId: existingSessionId, history } = req.body;
-    
-    const sessionId = existingSessionId || generateSessionId();
+    const { message, history } = req.body;
     const config = AGENT_CONFIGS.imageCreator;
+
+    logAgentOperation({
+      agentName: config.name,
+      agentRole: config.role,
+      sessionId,
+      operation: '开始图像参数分析',
+      detail: `用户输入: ${message?.substring(0, 100)}`,
+      result: 'pending',
+      input: message?.substring(0, 300),
+    });
     
     const existingContext = agentContexts.get(sessionId);
     const context: AgentContext = existingContext || {
@@ -506,6 +502,7 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
     const hermesResponse = await callHermesWithContext(message, config.systemPrompt, sessionId, history);
     
     let analysis = {};
+    let usedFallback = false;
     if (hermesResponse) {
       try {
         const jsonMatch = hermesResponse.match(/\{[\s\S]*\}/);
@@ -513,12 +510,15 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
           analysis = JSON.parse(jsonMatch[0]);
         } else {
           analysis = parseImageAnalysisFromText(hermesResponse, message);
+          usedFallback = true;
         }
       } catch {
         analysis = parseImageAnalysisFromText(hermesResponse, message);
+        usedFallback = true;
       }
     } else {
       analysis = generateMockImageAnalysis(message);
+      usedFallback = true;
     }
 
     context.thoughts.push({
@@ -535,6 +535,18 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
     context.updatedAt = Date.now();
     agentContexts.set(sessionId, context);
 
+    const duration = Date.now() - startTime;
+    logAgentOperation({
+      agentName: config.name,
+      agentRole: config.role,
+      sessionId,
+      operation: '图像参数分析完成',
+      detail: `style=${(analysis as any).style}${usedFallback ? '(使用本地解析)' : '(LLM解析)'}`,
+      result: 'success',
+      duration,
+      output: JSON.stringify(analysis)?.substring(0, 300),
+    });
+
     res.json({
       success: true,
       sessionId,
@@ -544,6 +556,17 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
       thoughts: context.thoughts,
     });
   } catch (error) {
+    const duration = Date.now() - startTime;
+    logAgentOperation({
+      agentName: '图像创作专家',
+      agentRole: 'imageCreator',
+      sessionId,
+      operation: '图像参数分析失败',
+      detail: `异常: ${(error as Error).message}`,
+      result: 'failure',
+      duration,
+      error: (error as Error).message,
+    });
     console.error('Image analyzer error:', error);
     res.json({
       success: false,
@@ -553,13 +576,25 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
 });
 
 router.post('/video/generate', async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  const sessionId = req.body.sessionId || generateSessionId();
   try {
-    const { sessionId, script, originalMessage, history } = req.body;
-    
+    const { script, originalMessage, history } = req.body;
     const config = AGENT_CONFIGS.videoMaker;
-    const existingContext = agentContexts.get(sessionId || '');
+
+    logAgentOperation({
+      agentName: config.name,
+      agentRole: config.role,
+      sessionId,
+      operation: '开始视频生成参数提取',
+      detail: `输入: ${(originalMessage || script)?.substring(0, 100)}`,
+      result: 'pending',
+      input: (originalMessage || script)?.substring(0, 300),
+    });
+
+    const existingContext = agentContexts.get(sessionId);
     const context: AgentContext = existingContext || {
-      sessionId: sessionId || generateSessionId(),
+      sessionId,
       userInput: originalMessage || script,
       thoughts: [],
       createdAt: Date.now(),
@@ -614,6 +649,18 @@ router.post('/video/generate', async (req: Request, res: Response) => {
     context.updatedAt = Date.now();
     agentContexts.set(sessionId, context);
 
+    const duration = Date.now() - startTime;
+    logAgentOperation({
+      agentName: config.name,
+      agentRole: config.role,
+      sessionId,
+      operation: '视频生成参数提取完成',
+      detail: `style=${(analysis as any).style}, duration=${(analysis as any).duration}`,
+      result: 'success',
+      duration,
+      output: JSON.stringify(analysis)?.substring(0, 300),
+    });
+
     res.json({
       success: true,
       sessionId,
@@ -623,6 +670,17 @@ router.post('/video/generate', async (req: Request, res: Response) => {
       thoughts: context.thoughts,
     });
   } catch (error) {
+    const duration = Date.now() - startTime;
+    logAgentOperation({
+      agentName: '视频制作专家',
+      agentRole: 'videoMaker',
+      sessionId,
+      operation: '视频生成参数提取失败',
+      detail: `异常: ${(error as Error).message}`,
+      result: 'failure',
+      duration,
+      error: (error as Error).message,
+    });
     console.error('Video generation error:', error);
     res.json({
       success: false,

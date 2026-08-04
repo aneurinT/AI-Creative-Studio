@@ -6,6 +6,7 @@ import { analyzeImageWithText } from '../services/imageService.js';
 import { reviewUserIntent, findMemoryMatch, recordMemory } from '../services/reviewAgent.js';
 import { reviewVideoScript, reviewVideoParams, quickScoreVideoPrompt, reviewVideoFinal, analyzeFailure } from '../services/videoReviewAgent.js';
 import { retrievePromptTemplate, retrieveVisualStyle, buildRAGContext, semanticRAG, seedKnowledgeBase } from '../services/ragKnowledge.js';
+import { logUserAction, logAgentOperation } from '../services/loggerService.js';
 
 import { CHAT_MODEL, CHAT_API, getChatApiKey, CHAT_FALLBACK_MODEL, CHAT_FALLBACK_API, getChatFallbackApiKey } from '../services/llmConfig.js';
 
@@ -47,25 +48,29 @@ async function tryCallLLM(
   model: string,
   provider: string,
 ): Promise<{ action: string; params: Record<string, any>; response: string } | null> {
-  const systemPrompt = `你是 AI 创意助手，负责理解用户创作需求并精准识别意图。
+  const systemPrompt = `你是一个智能 AI 助手，请充分理解用户的每一句话，进行深度分析。
 
-## Action 类型与识别规则
+## 核心原则（非常重要）
+不要被任何预设的"功能列表"限制你的判断。你需要：
+1. **完整理解用户需求**：用户可能想要多种操作的组合，可能是复杂工作流，不要简单归类
+2. **分析历史关联**：用户说的"它"、"刚才的"、"再"、"继续"、"一样的"等，要结合历史对话理解
+3. **自由决定任务类型**：根据你对用户意图的理解，自己决定最合适的 action 和处理方式
+4. **给出有洞察力的回应**：不只是"收到，正在处理"，而是展示你对需求的理解
 
-### image（图片生成）
-关键词：画、生成图、制作图片、画一张、画个、插画、海报、壁纸
-params: prompt, style, size(默认1024x1024)
+## 任务分析流程（你需要默默完成这些分析，然后输出结果）
+1. 用户的核心目标是什么？
+2. 与历史对话有什么关联？
+3. 需要哪些步骤来完成？
+4. 有哪些隐含需求？（用户没说但可能需要的）
 
-### video（视频生成）  
-关键词：视频、片子、短片、动画、制作视频、生成视频、拍一个、广告片
-时长推断：用户说"15秒"→ duration:15 | "30秒"→ 30 | "1分钟"→ 60 | 没说→ 默认10
-style: 广告/宣传 → cinematic | 动漫/卡通 → anime | 写实 → realistic
+## action 类型参考（仅供参考，你可以根据需要自由组合）
+- 需要生成/创作 → image / video
+- 需要修改已有的 → modify-image / modify-video
+- 需要处理图片 → remove-bg / compose / ocr
+- 通用问题 → general
 
-### modify-image / modify-video / remove-bg / compose / general
-
-## 输出格式（严格JSON，不要其他文字）
-{"action":"video","params":{"prompt":"提示词","style":"realistic","duration":10},"response":"正在生成..."}
-{"action":"image","params":{"prompt":"提示词","style":"anime","size":"1024x1024"},"response":"正在生成..."}
-{"action":"general","params":{"query":"提问"},"response":"回答"}`;
+## 输出格式（JSON）
+{"action":"你判断的任务类型","params":{"具体参数"},"response":"你对需求的理解和回应","contextAnalysis":"与历史对话的关联分析"}`;
 
   try {
     const response = await fetchWithTimeout(apiUrl, {
@@ -78,11 +83,23 @@ style: 广告/宣传 → cinematic | 动漫/卡通 → anime | 写实 → realis
         model,
         messages: [
           { role: 'system', content: systemPrompt },
-          ...history.slice(-5).map((m: any) => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.content })),
+          ...history.slice(-5).map((m: any) => {
+            // 构建富上下文历史消息
+            let enrichedContent = m.content;
+            if (m.role === 'assistant') {
+              if (m.actionType === 'image' && m.originalPrompt) {
+                enrichedContent += ` [原始图片prompt: ${m.originalPrompt}]`;
+              }
+              if (m.actionType === 'video' && m.originalPrompt) {
+                enrichedContent += ` [原始视频prompt: ${m.originalPrompt}]`;
+              }
+            }
+            return { role: m.role === 'user' ? 'user' : 'assistant', content: enrichedContent };
+          }),
           { role: 'user', content: message },
         ],
         temperature: 0.7,
-        max_tokens: 400,
+        max_tokens: 500,
       }),
     }, 15000); // 15 秒超时，比之前的 20 秒更快
 
@@ -99,16 +116,16 @@ style: 广告/宣传 → cinematic | 动漫/卡通 → anime | 写实 → realis
     if (!jsonMatch) return null;
 
     const parsed = JSON.parse(jsonMatch[0]);
-    const action = (parsed.action || '').toLowerCase();
-    const validActions = ['image', 'video', 'modify-image', 'modify-video', 'remove-bg', 'compose', 'general'];
-    const mappedAction = validActions.find(a => action.includes(a)) || 'general';
+    // 不再限制 action 白名单，agent 可以自由决定任务类型
+    const action = (parsed.action || 'general').toLowerCase();
 
-    console.log(`[${provider}] Intent: ${mappedAction} | ${parsed.response?.substring(0, 50)}`);
+    console.log(`[${provider}] Intent: ${action} | ${parsed.response?.substring(0, 80)}`);
 
     return {
-      action: mappedAction,
+      action,
       params: parsed.params || {},
       response: parsed.response || '我理解你的需求了，正在帮你处理...',
+      contextAnalysis: parsed.contextAnalysis || '',
     };
   } catch (error) {
     console.warn(`[${provider}] Exception:`, (error as Error).message);
@@ -129,18 +146,20 @@ function parseHermesAction(output: string, originalMessage: string): { action: s
     try {
       const parsed = JSON.parse(jsonMatch[0]);
       if (parsed.action || parsed.Action || parsed.intent) {
-        const action = (parsed.action || parsed.Action || parsed.intent || '').toLowerCase();
-        const validActions = ['image', 'video', 'modify-image', 'modify-video', 'remove-bg', 'compose', 'general'];
-        const mappedAction = validActions.find(a => action.includes(a)) || fallback.action;
-
+        const action = (parsed.action || parsed.Action || parsed.intent || 'general').toLowerCase();
         const params: Record<string, any> = {};
         const value = parsed.params || parsed.Parameters || parsed;
         params.prompt = value.prompt || value.description || value.Prompt || originalMessage;
         if (value.style || value.Style) params.style = value.style || value.Style;
         if (value.duration || value.Duration) params.duration = value.duration || value.Duration;
         if (value.size || value.Size) params.size = value.size || value.Size;
-
-        return { action: mappedAction, params };
+        // 透传所有额外参数，不限制
+        for (const [k, v] of Object.entries(value)) {
+          if (!['prompt', 'style', 'duration', 'size'].includes(k)) {
+            params[k] = v;
+          }
+        }
+        return { action, params };
       }
     } catch {
       // JSON 解析失败，继续
@@ -162,22 +181,19 @@ function parseHermesAction(output: string, originalMessage: string): { action: s
   }
 
   if (kvMap.action || kvMap.intent) {
-    const action = (kvMap.action || kvMap.intent || '').toLowerCase();
-    const validActions = ['image', 'video', 'modify-image', 'modify-video', 'remove-bg', 'compose', 'general'];
-    const mappedAction = validActions.find(a => action.includes(a)) || fallback.action;
+    const action = (kvMap.action || kvMap.intent || 'general').toLowerCase();
     const params: Record<string, any> = {};
     params.prompt = kvMap.prompt || kvMap.description || originalMessage;
     if (kvMap.style) params.style = kvMap.style;
     if (kvMap.duration) params.duration = kvMap.duration;
     if (kvMap.size) params.size = kvMap.size;
-
-    return { action: mappedAction, params };
-  }
-
-  // 尝试 3: 从响应文本中推断
-  const responseLower = output.toLowerCase();
-  if (responseLower.includes('视频') || responseLower.includes('video')) {
-    return { action: 'video', params: { prompt: originalMessage, duration: '5' } };
+    // 透传额外参数
+    for (const [k, v] of Object.entries(kvMap)) {
+      if (!['action', 'intent', 'prompt', 'description', 'style', 'duration', 'size'].includes(k)) {
+        params[k] = v;
+      }
+    }
+    return { action, params };
   }
 
   // 回退
@@ -187,28 +203,35 @@ function parseHermesAction(output: string, originalMessage: string): { action: s
 function fallbackAnalyze(message: string): { action: string; params: Record<string, any> } {
   const lowerText = message.toLowerCase();
 
+  // 检测修改类意图
   if (lowerText.includes('修改') || lowerText.includes('更改') || lowerText.includes('换成') || lowerText.includes('改成')) {
-    let modifyType = 'background';
+    const isVideo = lowerText.includes('视频') || lowerText.includes('video');
+    const isImage = lowerText.includes('图片') || lowerText.includes('图像') || lowerText.includes('image') || lowerText.includes('图');
+    let modifyType = 'general';
     if (lowerText.includes('背景')) modifyType = 'background';
-    else if (lowerText.includes('人物') || lowerText.includes('角色') || lowerText.includes('着装') || lowerText.includes('性别')) modifyType = 'character';
+    else if (lowerText.includes('人物') || lowerText.includes('角色') || lowerText.includes('着装')) modifyType = 'character';
     else if (lowerText.includes('音乐') || lowerText.includes('bgm') || lowerText.includes('音效')) modifyType = 'music';
     else if (lowerText.includes('剧情') || lowerText.includes('故事') || lowerText.includes('情节')) modifyType = 'story';
     else if (lowerText.includes('风格')) modifyType = 'style';
 
     return {
-      action: 'modify-video',
-      params: { modifyType, description: message },
+      action: isVideo ? 'modify-video' : isImage ? 'modify-image' : 'modify-video',
+      params: { modifyType, description: message, prompt: message },
     };
   }
 
-  let action = 'image';
-
-  if (lowerText.includes('视频') || lowerText.includes('video')) {
+  // 检测任务类型
+  let action = 'image'; // 默认图片
+  if (lowerText.includes('视频') || lowerText.includes('video') || lowerText.includes('片子') || lowerText.includes('短片')) {
     action = 'video';
-  } else if (lowerText.includes('抠图') || lowerText.includes('去背景') || lowerText.includes('移除背景')) {
+  } else if (lowerText.includes('抠图') || lowerText.includes('去背景') || lowerText.includes('移除背景') || lowerText.includes('removebg')) {
     action = 'remove-bg';
   } else if (lowerText.includes('合成') || lowerText.includes('组合') || lowerText.includes('叠加')) {
     action = 'compose';
+  } else if (lowerText.includes('识别') || lowerText.includes('ocr') || lowerText.includes('提取文字') || lowerText.includes('识别文字')) {
+    action = 'ocr';
+  } else if (isGeneralQuery(message)) {
+    action = 'general';
   }
 
   return {
@@ -217,53 +240,27 @@ function fallbackAnalyze(message: string): { action: string; params: Record<stri
   };
 }
 
-// 判断是否为通用问答类指令（非图片/视频创作需求）
-// 例如：天气查询、时间日期、知识问答、闲聊等
+// 判断是否为通用问答类指令
+// 不再严格排除"创作类关键词"，让 agent 自行判断
 function isGeneralQuery(message: string): boolean {
   const lowerText = message.toLowerCase();
 
-  // 创作类关键词：如果包含这些词，说明是图片/视频创作需求，不走通用问答
-  const creativeKeywords = [
-    '生成', '创作', '制作', '画', '描绘', '设计', '创建',
-    '视频', 'video', '图片', '图像', 'image', 'picture',
-    '抠图', '去背景', '移除背景', '合成', '组合', '叠加',
-    '风格', '写实', '动漫', '电影', '卡通', '水彩', '油画',
-    '修改', '更改', '换成', '改成',
-  ];
-
-  // 如果明确包含创作关键词，则不是通用问答
-  if (creativeKeywords.some(kw => lowerText.includes(kw))) {
-    return false;
-  }
-
-  // 通用问答类关键词
-  const generalKeywords = [
-    '天气', '气温', '温度', '下雨', '下雪', '天气预报',
-    '今天', '明天', '后天', '日期', '时间', '几点', '星期',
-    '什么是', '为什么', '怎么', '如何', '请问', '解释',
-    '告诉', '介绍', '说明', '区别', '定义', '含义',
-    '翻译', '计算', '算一下', '等于',
-    '你好', '你是谁', '能做什么', '帮助', 'help',
-    '新闻', '热点', '事件', '历史',
-  ];
-
   // 疑问句式判断
   const questionPatterns = [
-    /[?？]$/,          // 以问号结尾
+    /[?？]$/,
     /^(什么是|为什么|怎么|如何|哪里|哪个|谁|何时|多少)/,
     /^(what|why|how|where|when|who|which)\s/i,
-    /^(is|are|can|could|would|will|do|does|did)\s/i,
   ];
 
-  // 包含通用问答关键词
-  if (generalKeywords.some(kw => lowerText.includes(kw))) {
-    return true;
-  }
+  // 纯粹的知识问答/闲聊
+  const pureGeneralKeywords = [
+    '天气', '气温', '温度', '下雨', '下雪', '天气预报',
+    '你好', '你是谁', '能做什么', '帮助', 'help',
+    '翻译', '计算', '算一下',
+  ];
 
-  // 匹配疑问句式
-  if (questionPatterns.some(pattern => pattern.test(message))) {
-    return true;
-  }
+  if (pureGeneralKeywords.some(kw => lowerText.includes(kw))) return true;
+  if (questionPatterns.some(p => p.test(message))) return true;
 
   return false;
 }
@@ -333,6 +330,7 @@ router.get('/health', async (req: Request, res: Response) => {
 });
 
 router.post('/chat', async (req: Request, res: Response): Promise<void> => {
+  const startTime = Date.now();
   try {
     const { message, history } = req.body;
     
@@ -348,6 +346,13 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
     // 若是，则直接返回通用回复，不走图片/视频创作流程
     if (isGeneralQuery(message)) {
       const generalResponse = generateGeneralResponse(message);
+      logUserAction({
+        operation: '意图识别',
+        detail: `通用问答: ${message?.substring(0, 100)}`,
+        result: 'success',
+        duration: Date.now() - startTime,
+        metadata: { action: 'general' },
+      });
       res.json({
         success: true,
         response: generalResponse,
@@ -369,7 +374,14 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
       if (ragResult.template) { llmResult.params.prompt = (llmResult.params.prompt || message) + ' | ' + ragResult.template.prompt.substring(0, 150); }
       if (ragResult.style) { llmResult.params.style = ragResult.style.keywords[0] === '动漫' ? 'anime' : llmResult.params.style; }
       if (ragContext) { llmResult.params.ragContext = ragContext; }
-      res.json({ success: true, response: llmResult.response, action: llmResult.action, params: llmResult.params });
+      logUserAction({
+        operation: '意图识别',
+        detail: `LLM识别: action=${llmResult.action}, ${message?.substring(0, 80)}`,
+        result: 'success',
+        duration: Date.now() - startTime,
+        metadata: { action: llmResult.action, provider: 'LLM' },
+      });
+      res.json({ success: true, response: llmResult.response, action: llmResult.action, params: llmResult.params, contextAnalysis: (llmResult as any).contextAnalysis || '' });
       return;
     }
 
@@ -510,6 +522,7 @@ router.post('/chat-with-image', async (req: Request, res: Response): Promise<voi
 
 // 审核接口：检查 Agent 理解是否与用户意图一致
 router.post('/review', async (req: Request, res: Response): Promise<void> => {
+  const startTime = Date.now();
   try {
     const { userMessage, agentAction, agentParams, agentDescription } = req.body;
 
@@ -522,6 +535,15 @@ router.post('/review', async (req: Request, res: Response): Promise<void> => {
     const memoryMatch = findMemoryMatch(userMessage);
     if (memoryMatch && memoryMatch.hitCount >= 3) {
       console.log(`[ReviewAgent] 📚 Memory match! Using learned result`);
+      logAgentOperation({
+        agentName: '审核Agent',
+        agentRole: 'reviewer',
+        operation: '审核检查',
+        detail: `记忆匹配: ${userMessage?.substring(0, 80)} -> ${agentAction}`,
+        result: 'success',
+        duration: Date.now() - startTime,
+        input: userMessage?.substring(0, 200),
+      });
       res.json({
         success: true,
         result: {
@@ -542,8 +564,28 @@ router.post('/review', async (req: Request, res: Response): Promise<void> => {
       agentDescription || '',
     );
 
+    logAgentOperation({
+      agentName: '审核Agent',
+      agentRole: 'reviewer',
+      operation: '审核检查',
+      detail: `审核结果: ${reviewResult.passed ? '通过' : '未通过'} - ${reviewResult.explanation}`,
+      result: reviewResult.passed ? 'success' : 'failure',
+      duration: Date.now() - startTime,
+      input: userMessage?.substring(0, 200),
+      output: JSON.stringify(reviewResult)?.substring(0, 300),
+    });
+
     res.json({ success: true, result: reviewResult });
   } catch (error) {
+    logAgentOperation({
+      agentName: '审核Agent',
+      agentRole: 'reviewer',
+      operation: '审核异常',
+      detail: `异常: ${(error as Error).message}`,
+      result: 'failure',
+      duration: Date.now() - startTime,
+      error: (error as Error).message,
+    });
     console.error('[ReviewRoute] Error:', error);
     res.json({
       success: true,
@@ -603,11 +645,31 @@ router.post('/video-review', async (req: Request, res: Response): Promise<void> 
  * POST /api/hermes/failure-analysis
  */
 router.post('/failure-analysis', async (req: Request, res: Response): Promise<void> => {
+  const startTime = Date.now();
   try {
     const { errorMsg, userPrompt, style, duration, engine } = req.body;
     const result = await analyzeFailure(errorMsg || '', userPrompt || '', style || '', duration || '10', engine || '未知');
+    logAgentOperation({
+      agentName: '审核Agent',
+      agentRole: 'reviewer',
+      operation: '失败分析',
+      detail: `错误: ${errorMsg?.substring(0, 100)} | 引擎: ${engine}`,
+      result: 'success',
+      duration: Date.now() - startTime,
+      error: errorMsg?.substring(0, 300),
+      output: result?.reason?.substring(0, 200),
+    });
     res.json({ success: true, result });
   } catch (error) {
+    logAgentOperation({
+      agentName: '审核Agent',
+      agentRole: 'reviewer',
+      operation: '失败分析异常',
+      detail: `异常: ${(error as Error).message}`,
+      result: 'failure',
+      duration: Date.now() - startTime,
+      error: (error as Error).message,
+    });
     res.json({ success: false, error: (error as Error).message });
   }
 });

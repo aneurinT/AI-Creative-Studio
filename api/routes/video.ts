@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express'
 import { checkVideoTaskStatus } from '../services/imageService.js'
 import { generateSplitVideo } from '../services/videoSplitService.js'
 import { getVideoHistory, addToVideoHistory, deleteFromVideoHistory, clearVideoHistory } from '../services/videoHistoryService.js'
-import { getPendingTasks, addPendingTask, removePendingTask, clearAllPendingTasks } from '../services/videoTaskService.js'
+import { getPendingTasks, addPendingTask, removePendingTask, clearAllPendingTasks, updateTaskStatus, cleanStaleTasks } from '../services/videoTaskService.js'
 import { getTaskProgress, setTaskProgress, updateTaskProgress, removeTaskProgress, checkTaskExists } from '../services/videoTaskProgressService.js'
 import { createFreeVideoTask, checkFreeVideoStatus, generateZhipuVideo, generateWanxVideo, checkZhipuVideoStatus, checkWanxVideoStatus, generateSeedanceVideo } from '../services/freeVideoService.js'
 import fetch from 'node-fetch'
@@ -132,6 +132,24 @@ router.delete('/pending/:taskId', (req: Request, res: Response) => {
 
 router.delete('/pending', (req: Request, res: Response) => {
   const result = clearAllPendingTasks()
+  res.json(result)
+})
+
+/** 标记任务为已完成或失败（全局状态同步） */
+router.put('/pending/:taskId/status', (req: Request, res: Response) => {
+  const { taskId } = req.params
+  const { status } = req.body
+  if (!status || !['completed', 'failed'].includes(status)) {
+    res.status(400).json({ success: false, error: 'status must be completed or failed' })
+    return
+  }
+  const result = updateTaskStatus(taskId, status)
+  res.json(result)
+})
+
+/** 清理过期任务（前端可定时调用） */
+router.post('/pending/clean', (req: Request, res: Response) => {
+  const result = cleanStaleTasks()
   res.json(result)
 })
 

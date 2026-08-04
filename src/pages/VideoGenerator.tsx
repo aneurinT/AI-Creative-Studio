@@ -150,6 +150,8 @@ export default function VideoGenerator() {
       const token = localStorage.getItem('auth_token');
       const headers: Record<string, string> = {};
       if (token) headers['Authorization'] = `Bearer ${token}`;
+      // 先清理过期任务
+      await fetch('/api/video/pending/clean', { method: 'POST', headers }).catch(() => {});
       const response = await fetch('/api/video/pending', { headers });
       const result = await response.json();
       if (result.success) {
@@ -596,6 +598,12 @@ export default function VideoGenerator() {
       const token = localStorage.getItem('auth_token');
       const headers: Record<string, string> = {};
       if (token) headers['Authorization'] = `Bearer ${token}`;
+      // 先标记为失败，再删除
+      await fetch(`/api/video/pending/${taskId}/status`, {
+        method: 'PUT',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'failed' }),
+      }).catch(() => {});
       await fetch(`/api/video/pending/${taskId}`, { method: 'DELETE', headers });
       setPendingTasks(prev => prev.filter(t => t.taskId !== taskId));
     } catch (error) {

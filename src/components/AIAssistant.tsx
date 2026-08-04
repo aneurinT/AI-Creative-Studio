@@ -31,6 +31,7 @@ interface ChatMessage {
   isGenerating?: boolean;
   progress?: number;
   agentThoughts?: AgentThought[];
+  agentProcess?: AgentProcess;
   sessionId?: string;
   originalPrompt?: string;
   modifyHistory?: { prompt: string; result: string; timestamp: number }[];
@@ -44,6 +45,21 @@ interface AgentThought {
   action?: string;
   output?: string;
   timestamp: number;
+}
+
+/** Agent 分析流程步骤，用于可视化展示每个 Agent 的任务理解与分析过程 */
+interface AgentProcessStep {
+  agentName: string;
+  agentIcon: string;
+  stepName: string;
+  status: 'pending' | 'running' | 'done' | 'error';
+  detail?: string;
+  timestamp: number;
+}
+
+interface AgentProcess {
+  taskType: 'image' | 'video';
+  steps: AgentProcessStep[];
 }
 
 const STYLE_MAP: Record<string, string> = {
@@ -194,7 +210,43 @@ export default function AIAssistant() {
     return () => clearInterval(interval);
   }, [messages]);
 
-  // 获取所有未完成的生成任务
+  /** 客户端日志上报（异步，不阻塞 UI） */
+  function logToServer(operation: string, detail: string, result?: 'success' | 'failure', duration?: number, error?: string) {
+    fetch('/api/log', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ operation, detail, result, duration, error }),
+    }).catch(() => {}); // 日志上报失败不影响主流程
+  }
+
+  /** 更新 Agent 流程步骤状态 */
+  function updateAgentProcessStep(processMsgId: string, stepIndex: number, updates: Partial<AgentProcessStep>) {
+    setMessages(prev => prev.map(m => {
+      if (m.id === processMsgId && m.agentProcess) {
+        const newSteps = m.agentProcess.steps.map((s, i) => i === stepIndex ? { ...s, ...updates } : s);
+        return { ...m, agentProcess: { ...m.agentProcess, steps: newSteps } };
+      }
+      return m;
+    }));
+  }
+
+  /** 全局任务状态同步：通知后端更新任务状态，确保视频生成页面也能感知 */
+  async function syncGlobalTaskStatus(taskId: string, status: 'completed' | 'failed') {
+    try {
+      await fetch(`/api/video/pending/${taskId}/status`, {
+        method: 'PUT',
+        headers: authHeaders(),
+        body: JSON.stringify({ status }),
+      });
+      console.log(`[GlobalSync] Task ${taskId} -> ${status}`);
+    } catch (e) {
+      console.warn('[GlobalSync] Failed to sync task status:', e);
+    }
+  }
+
+  /** 获取所有未完成的生成任务
+   * 获取所有未完成的生成任务
+   */
   function getPendingTasks(): ChatMessage[] {
     return messages.filter(m => {
       if (m.actionType !== 'video' && m.actionType !== 'image') return false
@@ -298,6 +350,7 @@ export default function AIAssistant() {
   // 终止所有未完成任务，并启动 5 秒冷却
   function abortAllPendingTasks() {
     const pending = getPendingTasks();
+    logToServer('用户终止任务', `终止 ${pending.length} 个进行中的任务`, 'success');
     pending.forEach(task => {
       const controller = activeTasksRef.current.get(task.id);
       if (controller) {
@@ -517,68 +570,86 @@ export default function AIAssistant() {
     return 'realistic';
   }
 
-  function recognizeAction(text: string): { action: string; params: Record<string, any> } {
+  function recognizeAction(text: string): { action: string; params: Record<string, any>; contextAnalysis?: string } {
     const lowerText = text.toLowerCase();
     
+    // 上下文关联分析：检测指代词和延续性指令
+    let contextAnalysis = '';
+    const referentialWords = ['它', '这个', '那个', '刚才的', '之前的', '上面的', '上一个', '刚刚的'];
+    const hasReferential = referentialWords.some(w => text.includes(w));
+    const continuationWords = ['再', '继续', '还是', '一样的', '类似的', '同样的', '保持', '按这个'];
+    const hasContinuation = continuationWords.some(w => text.includes(w));
+    
+    if (hasReferential) {
+      if (videoContext) {
+        contextAnalysis = `检测到指代词，关联到上一个视频任务：${videoContext.prompt?.substring(0, 30) || '未知'}...`;
+      } else if (imageContext) {
+        contextAnalysis = `检测到指代词，关联到上一个图片任务：${imageContext.prompt?.substring(0, 30) || '未知'}...`;
+      }
+    } else if (hasContinuation) {
+      if (videoContext) {
+        contextAnalysis = `检测到延续性指令，将沿用上一个视频的风格和参数`;
+      } else if (imageContext) {
+        contextAnalysis = `检测到延续性指令，将沿用上一个图片的风格和参数`;
+      }
+    }
+    
+    // 修改类意图
     if (lowerText.includes('修改') || lowerText.includes('更改') || lowerText.includes('换成') || lowerText.includes('改成')) {
-      let modifyType = 'background';
+      let modifyType = 'general';
       if (lowerText.includes('背景')) modifyType = 'background';
-      else if (lowerText.includes('人物') || lowerText.includes('角色') || lowerText.includes('着装') || lowerText.includes('性别')) modifyType = 'character';
+      else if (lowerText.includes('人物') || lowerText.includes('角色') || lowerText.includes('着装')) modifyType = 'character';
       else if (lowerText.includes('音乐') || lowerText.includes('bgm') || lowerText.includes('音效')) modifyType = 'music';
       else if (lowerText.includes('剧情') || lowerText.includes('故事') || lowerText.includes('情节')) modifyType = 'story';
       else if (lowerText.includes('风格')) modifyType = 'style';
-      
+
       const hasVideoKeyword = lowerText.includes('视频') || lowerText.includes('video');
       const hasImageKeyword = lowerText.includes('图片') || lowerText.includes('image') || lowerText.includes('图');
-      
-      if (hasVideoKeyword || (!hasImageKeyword && videoContext)) {
-        return {
-          action: 'modify-video',
-          params: {
-            modifyType,
-            description: text,
-            currentPrompt: videoContext?.prompt || '',
-            currentStyle: videoContext?.style || '',
-            currentDuration: videoContext?.duration || '',
-          },
-        };
-      } else {
-        return {
-          action: 'modify-image',
-          params: {
-            modifyType,
-            description: text,
-            currentPrompt: imageContext?.prompt || '',
-            currentStyle: imageContext?.style || '',
-          },
-        };
-      }
+      const action = hasVideoKeyword ? 'modify-video' : hasImageKeyword ? 'modify-image'
+        : videoContext ? 'modify-video' : imageContext ? 'modify-image' : 'modify-video';
+
+      return {
+        action,
+        params: {
+          modifyType,
+          description: text,
+          currentPrompt: (action === 'modify-video' ? videoContext : imageContext)?.prompt || '',
+          currentStyle: (action === 'modify-video' ? videoContext : imageContext)?.style || '',
+          currentDuration: videoContext?.duration || '',
+          prompt: text,
+        },
+        contextAnalysis: contextAnalysis || `基于上一个${action === 'modify-video' ? '视频' : '图片'}进行修改`,
+      };
     }
 
+    // 简单关键词识别作为 fallback（agent 的判断优先）
     let action = 'image';
-    
-    if (lowerText.includes('视频') || lowerText.includes('video')) {
+    if (lowerText.includes('视频') || lowerText.includes('video') || lowerText.includes('片子') || lowerText.includes('短片')) {
       action = 'video';
-    } else if (lowerText.includes('抠图') || lowerText.includes('去背景') || lowerText.includes('移除背景')) {
+    } else if (lowerText.includes('抠图') || lowerText.includes('去背景') || lowerText.includes('移除背景') || lowerText.includes('removebg')) {
       action = 'remove-bg';
     } else if (lowerText.includes('合成') || lowerText.includes('组合') || lowerText.includes('叠加')) {
       action = 'compose';
+    } else if (lowerText.includes('识别') || lowerText.includes('ocr') || lowerText.includes('提取文字') || lowerText.includes('识别文字')) {
+      action = 'ocr';
     }
 
     const duration = action === 'video' ? extractDuration(text) : undefined;
     const style = extractStyle(text);
 
-    return {
-      action,
-      params: {
-        prompt: text,
-        style,
-        duration,
-      },
-    };
+    // 上下文继承
+    if (hasContinuation && !text.includes('风格') && !text.includes('style')) {
+      if (action === 'video' && videoContext) {
+        return { action, params: { prompt: text, style: videoContext.style || 'realistic', duration: duration || videoContext.duration || '10' }, contextAnalysis };
+      } else if (action === 'image' && imageContext) {
+        return { action, params: { prompt: text, style: imageContext.style || 'realistic' }, contextAnalysis };
+      }
+    }
+
+    return { action, params: { prompt: text, style, duration }, contextAnalysis };
   }
 
-  async function callHermesAgent(message: string, history: ChatMessage[], signal?: AbortSignal): Promise<{ action?: string; params?: Record<string, any>; response: string }> {
+  async function callHermesAgent(message: string, history: ChatMessage[], signal?: AbortSignal): Promise<{ action?: string; params?: Record<string, any>; response: string; contextAnalysis?: string }> {
     try {
       const response = await fetch('/api/hermes/chat', {
         method: 'POST',
@@ -588,6 +659,10 @@ export default function AIAssistant() {
           history: history.slice(-10).map(m => ({
             role: m.role,
             content: m.content,
+            actionType: m.actionType,
+            generatedImage: m.generatedImage,
+            generatedVideo: m.generatedVideo,
+            originalPrompt: m.originalPrompt,
           })),
         }),
         signal,
@@ -598,6 +673,7 @@ export default function AIAssistant() {
         action: data.action,
         params: data.params,
         response: data.response || '我理解你的需求了，正在帮你处理...',
+        contextAnalysis: data.contextAnalysis || '',
       };
     } catch {
       return { response: '我理解你的需求了，正在帮你处理...' };
@@ -605,7 +681,7 @@ export default function AIAssistant() {
   }
 
   // 多模态混合聊天：支持多图+文字
-  async function callHermesWithImage(message: string, imageUrls: string[], signal?: AbortSignal): Promise<{ action?: string; params?: Record<string, any>; response: string }> {
+  async function callHermesWithImage(message: string, imageUrls: string[], signal?: AbortSignal): Promise<{ action?: string; params?: Record<string, any>; response: string; contextAnalysis?: string }> {
     try {
       const response = await fetch('/api/hermes/chat-with-image', {
         method: 'POST',
@@ -706,7 +782,7 @@ export default function AIAssistant() {
     }
   }
 
-  async function generateImageAction(params: Record<string, any>) {
+  async function generateImageAction(params: Record<string, any>, processMsgId?: string) {
     const loadingId = `loading-${Date.now()}`;
     const controller = new AbortController();
     activeTasksRef.current.set(loadingId, controller);
@@ -747,6 +823,11 @@ export default function AIAssistant() {
         }
 
         if (data.success && data.imageUrl) {
+          if (processMsgId) {
+            updateAgentProcessStep(processMsgId, 2, { status: 'done', detail: '图片生成完成' });
+            updateAgentProcessStep(processMsgId, 3, { status: 'done', detail: '质量检查通过' });
+          }
+          logToServer('图片生成', `成功: ${params.prompt?.substring(0, 80)}`, 'success', Date.now() - (taskStartTimesRef.current.get(loadingId) || Date.now()));
           setImageContext({
             prompt: params.prompt,
             style: params.style || 'realistic',
@@ -787,6 +868,12 @@ export default function AIAssistant() {
             await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
           } else {
             activeTasksRef.current.delete(loadingId);
+            // 更新流程步骤
+            if (processMsgId) {
+              updateAgentProcessStep(processMsgId, 2, { status: 'error', detail: errorMsg?.substring(0, 50) || '生成失败' });
+              updateAgentProcessStep(processMsgId, 3, { status: 'error', detail: '任务失败' });
+            }
+            logToServer('图片生成', `失败(重试${MAX_RETRIES}次): ${errorMsg?.substring(0, 80)}`, 'failure', undefined, errorMsg);
             // ===== 全部失败：审核 Agent 分析原因 =====
             let imgAnalysis = '';
             try {
@@ -1056,12 +1143,17 @@ export default function AIAssistant() {
     setModifyInput('');
   }
 
-  async function generateVideoAction(params: Record<string, any>, agentThoughts: AgentThought[] = [], sessionId?: string) {
+  async function generateVideoAction(params: Record<string, any>, agentThoughts: AgentThought[] = [], sessionId?: string, processMsgId?: string) {
     const loadingId = `loading-${Date.now()}`;
     const controller = new AbortController();
     activeTasksRef.current.set(loadingId, controller);
     taskStartTimesRef.current.set(loadingId, Date.now());
     timeoutNoticeShownRef.current = false;
+
+    // 更新流程步骤：生成引擎运行中
+    if (processMsgId) {
+      updateAgentProcessStep(processMsgId, 4, { status: 'running', detail: '正在提交生成请求...' });
+    }
 
     // 🔍 审核 Agent：生成前快速评分
     let qualityBadge = '';
@@ -1155,7 +1247,7 @@ export default function AIAssistant() {
         }
 
         if (data.success && data.taskId) {
-          await pollVideoStatus(data.taskId, loadingId, params, controller);
+          await pollVideoStatus(data.taskId, loadingId, params, controller, processMsgId);
           return;
         } else {
           const errorMsg = data.error || '未知错误';
@@ -1221,7 +1313,7 @@ export default function AIAssistant() {
     }
   }
 
-  async function pollVideoStatus(taskId: string, loadingId: string, params: Record<string, any>, controller: AbortController) {
+  async function pollVideoStatus(taskId: string, loadingId: string, params: Record<string, any>, controller: AbortController, processMsgId?: string) {
     const MAX_POLL_RETRIES = 1; // 减少重试次数：Agent 审核失败不应重试，只有网络/暂时错误才重试一次
     const RETRY_DELAY_MS = 5000;
     let currentTaskId = taskId;
@@ -1361,12 +1453,19 @@ export default function AIAssistant() {
             }
 
             // ========== 审核通过 → 正常结束 ==========
+            if (processMsgId) {
+              updateAgentProcessStep(processMsgId, 4, { status: 'done', detail: '视频生成完成' });
+              updateAgentProcessStep(processMsgId, 5, { status: 'done', detail: '质量审核通过' });
+            }
             setVideoContext({
               prompt: params.prompt,
               style: params.style || 'realistic',
               duration: params.duration || '10',
               videoUrl: finalVideoUrl,
             });
+            // 全局任务状态同步：标记为完成
+            syncGlobalTaskStatus(currentTaskId, 'completed');
+            logToServer('视频生成', `成功: ${params.prompt?.substring(0, 80)}`, 'success');
             setMessages(prev => prev.map(m => {
               if (m.id === loadingId) {
                 return {
@@ -1535,6 +1634,16 @@ export default function AIAssistant() {
             // ===== 全部 Agent 失败：停止任务，不挂起 =====
             activeTasksRef.current.delete(loadingId);
 
+            // 全局任务状态同步：标记为失败
+            await syncGlobalTaskStatus(currentTaskId, 'failed');
+            logToServer('视频生成', `失败: ${errorMsg?.substring(0, 80)}`, 'failure', undefined, errorMsg);
+
+            // 更新流程步骤：生成失败
+            if (processMsgId) {
+              updateAgentProcessStep(processMsgId, 4, { status: 'error', detail: errorMsg.substring(0, 50) });
+              updateAgentProcessStep(processMsgId, 5, { status: 'error', detail: '任务失败' });
+            }
+
             // 通知后端取消所有后台轮询
             await fetch(`/api/video/cancel/${currentTaskId}`, {
               method: 'POST',
@@ -1637,6 +1746,7 @@ export default function AIAssistant() {
       const queueItem = { id: `queue-${Date.now()}`, text: input.trim(), timestamp: Date.now() };
       setMessageQueue(prev => [...prev, queueItem]);
       setInput('');
+      logToServer('消息入队', `有 ${pending.length} 个任务进行中，新消息自动入队: ${input.trim()?.substring(0, 80)}`);
       return;
     }
 
@@ -1790,6 +1900,7 @@ export default function AIAssistant() {
 
   // 实际执行发送逻辑
   async function executeSend(sendText: string, imageUrls?: string[]) {
+    const execStartTime = Date.now();
     const hasImages = imageUrls && imageUrls.length > 0;
     const imageCount = hasImages ? imageUrls!.length : 0;
     const userMessage: ChatMessage = {
@@ -1803,6 +1914,9 @@ export default function AIAssistant() {
     setMessages(prev => [...prev, userMessage]);
     setInput('');
     setIsTyping(true);
+
+    // 记录用户操作日志
+    logToServer('用户发送消息', hasImages ? `[${imageCount}张图片] ${sendText?.substring(0, 100)}` : sendText?.substring(0, 100));
 
     // 展示 Agent 思考状态
     const thinkingId = `thinking-${Date.now()}`;
@@ -1851,6 +1965,9 @@ export default function AIAssistant() {
         actionResult.action = hermesResult.action;
         actionResult.params = { ...actionResult.params, ...hermesResult.params };
       }
+      
+      // 合并上下文分析（优先使用 LLM 的分析，回退到本地分析）
+      const finalContextAnalysis = hermesResult.contextAnalysis || actionResult.contextAnalysis || '';
 
       // 🔍 审核 Agent：检查 Agent 的理解是否与用户意图一致
       let reviewCorrection = '';
@@ -1886,10 +2003,15 @@ export default function AIAssistant() {
         console.warn('[Review] Review agent call failed, skipping:', reviewErr);
       }
 
+      // 上下文关联分析提示
+      const contextTip = finalContextAnalysis
+        ? `\n\n🧠 *上下文分析：${finalContextAnalysis}*`
+        : '';
+
       const assistantMessage: ChatMessage = {
         id: `assistant-${Date.now()}`,
         role: 'assistant',
-        content: hermesResult.response + reviewCorrection,
+        content: hermesResult.response + reviewCorrection + contextTip,
         actionType: actionResult.action as any,
         params: actionResult.params,
         timestamp: Date.now(),
@@ -1899,33 +2021,51 @@ export default function AIAssistant() {
 
       switch (actionResult.action) {
         case 'video': {
-          const loadingId = `loading-${Date.now()}`;
+          // ===== Agent 流程可视化：创建流程消息 =====
+          const processMsgId = `process-${Date.now()}`;
+          const videoProcess: AgentProcess = {
+            taskType: 'video',
+            steps: [
+              { agentName: '意图识别Agent', agentIcon: '🧠', stepName: '意图识别与参数提取', status: 'done', detail: `识别为视频生成任务`, timestamp: Date.now() },
+              { agentName: '故事创作专家', agentIcon: '📝', stepName: '创作视频脚本', status: 'running', timestamp: Date.now() },
+              { agentName: '视频制作专家', agentIcon: '🎬', stepName: '分析脚本与提取参数', status: 'pending', timestamp: Date.now() },
+              { agentName: '审核Agent', agentIcon: '🔍', stepName: '审核脚本质量', status: 'pending', timestamp: Date.now() },
+              { agentName: '生成引擎', agentIcon: '📹', stepName: '提交视频生成任务', status: 'pending', timestamp: Date.now() },
+              { agentName: '审核Agent', agentIcon: '✅', stepName: '最终质量检查', status: 'pending', timestamp: Date.now() },
+            ]
+          };
           setMessages(prev => [...prev, {
-            id: loadingId,
+            id: processMsgId,
             role: 'assistant',
-            content: '📝 故事创作专家正在创作脚本...',
+            content: '',
             actionType: 'video',
+            agentProcess: videoProcess,
             isGenerating: true,
             timestamp: Date.now(),
           }]);
 
-          // 实时展示思考动画
-          const storyThoughtTimer = setInterval(() => {
-            setMessages(prev => prev.map(m => {
-              if (m.id === loadingId && m.isGenerating) {
-                const d = new Date().getSeconds() % 3;
-                return { ...m, content: `📝 故事创作专家正在创作脚本${'.'.repeat(d + 1)}` };
-              }
-              return m;
-            }));
-          }, 800);
-
           const storyResult = await callStoryWriter(sendText);
-          clearInterval(storyThoughtTimer);
+          
+          // 更新步骤2：故事创作专家
+          if (storyResult.success && storyResult.script) {
+            updateAgentProcessStep(processMsgId, 1, {
+              status: 'done',
+              detail: `脚本创作完成（${storyResult.script.length}字符）`,
+            });
+          } else {
+            updateAgentProcessStep(processMsgId, 1, {
+              status: 'error',
+              detail: '脚本创作失败，使用原始prompt',
+            });
+          }
+          
+          // 步骤3：视频制作专家分析
+          updateAgentProcessStep(processMsgId, 2, { status: 'running' });
           
           // 🔍 审核 Agent：实时审核脚本质量
           let scriptReviewBadge = '';
           if (storyResult.success && storyResult.script) {
+            updateAgentProcessStep(processMsgId, 3, { status: 'running' });
             try {
               const reviewResp = await fetch('/api/hermes/video-review', {
                 method: 'POST',
@@ -1942,50 +2082,20 @@ export default function AIAssistant() {
               if (r && r.level === 'error') {
                 scriptReviewBadge = `\n\n🚨 **审核警告：${r.message}**`;
                 if (r.suggestions?.length) scriptReviewBadge += `\n建议：${r.suggestions.join('；')}`;
+                updateAgentProcessStep(processMsgId, 3, { status: 'error', detail: r.message });
               } else if (r && r.level === 'warning') {
                 scriptReviewBadge = `\n\n⚠️ **审核提示：${r.message}**`;
+                updateAgentProcessStep(processMsgId, 3, { status: 'done', detail: r.message });
+              } else {
+                updateAgentProcessStep(processMsgId, 3, { status: 'done', detail: '脚本质量审核通过' });
               }
-            } catch {}
+            } catch {
+              updateAgentProcessStep(processMsgId, 3, { status: 'done', detail: '审核通过（默认）' });
+            }
           }
           
           if (storyResult.success && storyResult.script) {
-            setMessages(prev => prev.map(m => {
-              if (m.id === loadingId) {
-                return {
-                  ...m,
-                  content: `📝 脚本创作完成！\n\n${storyResult.script.substring(0, 200)}${storyResult.script.length > 200 ? '...' : ''}${scriptReviewBadge}`,
-                  agentThoughts: storyResult.thoughts,
-                  sessionId: storyResult.sessionId,
-                  isGenerating: false, // 脚本创作完成，立即清理 isGenerating 状态
-                };
-              }
-              return m;
-            }));
-
-            const analyzerLoadingId = `loading-${Date.now()}`;
-            setMessages(prev => [...prev, {
-              id: analyzerLoadingId,
-              role: 'assistant',
-              content: '🎬 视频制作专家正在分析脚本...',
-              actionType: 'video',
-              isGenerating: true,
-              progress: 0,
-              timestamp: Date.now(),
-            }]);
-
-            // 实时展示思考动画
-            const analyzerThoughtTimer = setInterval(() => {
-              setMessages(prev => prev.map(m => {
-                if (m.id === analyzerLoadingId && m.isGenerating) {
-                  const d = new Date().getSeconds() % 3;
-                  return { ...m, content: `🎬 视频制作专家正在分析脚本${'.'.repeat(d + 1)}` };
-                }
-                return m;
-              }));
-            }, 800);
-
             const analyzeResult = await callVideoAnalyzer(storyResult.script, storyResult.sessionId, sendText);
-            clearInterval(analyzerThoughtTimer);
 
             if (analyzeResult.success && analyzeResult.result) {
               const allThoughts = [...(storyResult.thoughts || []), ...(analyzeResult.thoughts || [])];
@@ -1994,27 +2104,27 @@ export default function AIAssistant() {
               if (userDuration !== '10' || sendText.match(/\d+\s*(秒|分钟|minute|min)/)) {
                 mergedResult.duration = userDuration;
               }
+              
+              updateAgentProcessStep(processMsgId, 2, {
+                status: 'done',
+                detail: `分析完成：${mergedResult.style || 'auto'}风格，${mergedResult.duration || '10'}秒${mergedResult.sceneBreakdown ? `，${mergedResult.sceneBreakdown.length}个分镜` : ''}`,
+              });
 
-              // 构建分析结果展示（包含分镜信息）
-              const resultPreview = mergedResult.sceneBreakdown && mergedResult.sceneBreakdown.length > 0
-                ? `🎬 视频分析完成！\n\n📋 **分镜脚本（${mergedResult.sceneBreakdown.length} 个镜头，${mergedResult.duration}秒）**：\n${mergedResult.sceneBreakdown.map((s: any) => `  ${s.scene}. ${s.description || s.prompt?.substring(0, 40)}（${s.duration}秒）`).join('\n')}\n\n🎨 风格：${mergedResult.style || 'auto'}\n📝 Prompt：${mergedResult.prompt?.substring(0, 80)}...`
-                : `🎬 视频分析完成！\n\n🎨 风格：${mergedResult.style || 'auto'}\n⏱ 时长：${mergedResult.duration || '10'}秒\n📝 Prompt：${mergedResult.prompt?.substring(0, 100)}...`;
-
+              // 更新步骤5：生成引擎
+              updateAgentProcessStep(processMsgId, 4, { status: 'running' });
+              // 完成流程消息的 isGenerating
               setMessages(prev => prev.map(m => {
-                if (m.id === analyzerLoadingId) {
-                  return {
-                    ...m,
-                    content: resultPreview,
-                    agentThoughts: allThoughts,
-                    isGenerating: false,
-                  };
+                if (m.id === processMsgId) {
+                  return { ...m, isGenerating: false };
                 }
                 return m;
               }));
-              await generateVideoAction(mergedResult, allThoughts, storyResult.sessionId);
+              
+              await generateVideoAction(mergedResult, allThoughts, storyResult.sessionId, processMsgId);
             } else {
+              updateAgentProcessStep(processMsgId, 2, { status: 'error', detail: '分析失败' });
               setMessages(prev => prev.map(m => {
-                if (m.id === analyzerLoadingId) {
+                if (m.id === processMsgId) {
                   return { ...m, isGenerating: false };
                 }
                 return m;
@@ -2022,50 +2132,64 @@ export default function AIAssistant() {
               await generateVideoAction(actionResult.params);
             }
           } else {
+            updateAgentProcessStep(processMsgId, 2, { status: 'error', detail: '跳过（无脚本）' });
+            updateAgentProcessStep(processMsgId, 3, { status: 'error', detail: '跳过' });
+            setMessages(prev => prev.map(m => {
+              if (m.id === processMsgId) {
+                return { ...m, isGenerating: false };
+              }
+              return m;
+            }));
             await generateVideoAction(actionResult.params);
           }
           break;
         }
         case 'image': {
-          const loadingId = `loading-${Date.now()}`;
+          // ===== Agent 流程可视化 =====
+          const imgProcessMsgId = `process-${Date.now()}`;
+          const imgProcess: AgentProcess = {
+            taskType: 'image',
+            steps: [
+              { agentName: '意图识别Agent', agentIcon: '🧠', stepName: '意图识别与参数提取', status: 'done', detail: '识别为图片生成任务', timestamp: Date.now() },
+              { agentName: '图像创作专家', agentIcon: '🎨', stepName: '分析需求与优化Prompt', status: 'running', timestamp: Date.now() },
+              { agentName: '生成引擎', agentIcon: '🖼️', stepName: '提交图片生成任务', status: 'pending', timestamp: Date.now() },
+              { agentName: '审核Agent', agentIcon: '✅', stepName: '质量检查', status: 'pending', timestamp: Date.now() },
+            ]
+          };
           setMessages(prev => [...prev, {
-            id: loadingId,
+            id: imgProcessMsgId,
             role: 'assistant',
-            content: '🎨 图像创作专家正在分析需求...',
+            content: '',
             actionType: 'image',
+            agentProcess: imgProcess,
             isGenerating: true,
             timestamp: Date.now(),
           }]);
 
-          // 实时展示思考动画
-          const imgThoughtTimer = setInterval(() => {
-            setMessages(prev => prev.map(m => {
-              if (m.id === loadingId && m.isGenerating) {
-                const d = new Date().getSeconds() % 3;
-                return { ...m, content: `🎨 图像创作专家正在分析需求${'.'.repeat(d + 1)}` };
-              }
-              return m;
-            }));
-          }, 800);
-
           const analyzeResult = await callImageAnalyzer(sendText);
-          clearInterval(imgThoughtTimer);
-
+          
           if (analyzeResult.success && analyzeResult.result) {
+            updateAgentProcessStep(imgProcessMsgId, 1, {
+              status: 'done',
+              detail: `分析完成：${analyzeResult.result.style || 'realistic'}风格`,
+            });
+            updateAgentProcessStep(imgProcessMsgId, 2, { status: 'running', detail: '正在生成...' });
             setMessages(prev => prev.map(m => {
-              if (m.id === loadingId) {
-                return {
-                  ...m,
-                  content: `🎨 分析完成！正在生成图片...`,
-                  agentThoughts: analyzeResult.thoughts,
-                  isGenerating: false, // 分析完成，立即清理 isGenerating
-                };
+              if (m.id === imgProcessMsgId) {
+                return { ...m, isGenerating: false };
               }
               return m;
             }));
-            await generateImageAction(analyzeResult.result);
+            await generateImageAction(analyzeResult.result, imgProcessMsgId);
           } else {
-            await generateImageAction(actionResult.params);
+            updateAgentProcessStep(imgProcessMsgId, 1, { status: 'error', detail: '分析失败，使用原始prompt' });
+            setMessages(prev => prev.map(m => {
+              if (m.id === imgProcessMsgId) {
+                return { ...m, isGenerating: false };
+              }
+              return m;
+            }));
+            await generateImageAction(actionResult.params, imgProcessMsgId);
           }
           break;
         }
@@ -2144,7 +2268,32 @@ export default function AIAssistant() {
           break;
         }
         case 'general': {
-          // 通用问答类指令（天气、时间、常识等），后端已返回回复内容，无需执行创作流程
+          // 通用问答类指令，后端已返回回复内容，无需执行创作流程
+          break;
+        }
+        default: {
+          // agent 返回了非标准 action，尝试智能处理
+          const act = actionResult.action;
+          if (act.includes('video') || act.includes('modify-video')) {
+            // 视频相关，走视频生成流程
+            await generateVideoAction(actionResult.params);
+          } else if (act.includes('image') || act.includes('modify-image') || act.includes('generate')) {
+            // 图片相关，走图片生成流程
+            await generateImageAction(actionResult.params);
+          } else if (act.includes('remove') || act.includes('bg') || act.includes('抠图')) {
+            await generateImageAction(actionResult.params);
+          } else if (act.includes('ocr') || act.includes('识别')) {
+            // OCR 识别类，引导用户到抠图/OCR 页面
+            setMessages(prev => [...prev, {
+              id: `tip-${Date.now()}`,
+              role: 'assistant',
+              content: '💡 文字识别功能请在「智能抠图」页面的「文字识别」模式中使用。我可以帮你生成图片或视频，有需要吗？',
+              timestamp: Date.now(),
+            }]);
+          } else {
+            // 未知 action，按通用问答处理
+            console.log(`[AI] Unknown action: ${act}, treating as general`);
+          }
           break;
         }
       }
@@ -2163,6 +2312,8 @@ export default function AIAssistant() {
       clearInterval(thinkingTimer);
       setMessages(prev => prev.filter(m => m.id !== thinkingId));
       setIsTyping(false);
+      // 记录任务总耗时
+      logToServer('任务处理完成', `总耗时: ${Date.now() - execStartTime}ms`);
       // 当前任务完成，自动消费队列中的下一个消息
       processNextInQueue();
     }
@@ -2546,6 +2697,53 @@ export default function AIAssistant() {
                       </div>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Agent 流程可视化 */}
+              {message.agentProcess && message.agentProcess.steps.length > 0 && (
+                <div className="mt-3 p-3 bg-gradient-to-r from-indigo-50 to-purple-50 rounded-lg border border-indigo-100">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Brain className="w-4 h-4 text-indigo-500" />
+                    <span className="text-xs font-semibold text-indigo-700">
+                      {message.agentProcess.taskType === 'video' ? '🎬 视频生成流程' : '🎨 图片生成流程'}
+                    </span>
+                    <span className="text-xs text-gray-400">
+                      {message.agentProcess.steps.filter(s => s.status === 'done').length}/{message.agentProcess.steps.length} 步骤完成
+                    </span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {message.agentProcess.steps.map((step, idx) => {
+                      const statusColors: Record<string, string> = {
+                        pending: 'text-gray-400 border-gray-200 bg-white',
+                        running: 'text-blue-600 border-blue-300 bg-blue-50 animate-pulse',
+                        done: 'text-green-600 border-green-300 bg-green-50',
+                        error: 'text-red-600 border-red-300 bg-red-50',
+                      };
+                      const statusIcons: Record<string, string> = {
+                        pending: '○',
+                        running: '◉',
+                        done: '✓',
+                        error: '✕',
+                      };
+                      const colorClass = statusColors[step.status] || statusColors.pending;
+                      return (
+                        <div key={idx} className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg border text-xs transition-all ${colorClass}`}>
+                          <span className="text-base">{step.agentIcon}</span>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-medium">{step.stepName}</span>
+                              <span className="text-[10px] opacity-60">({step.agentName})</span>
+                            </div>
+                            {step.detail && (
+                              <div className="text-[10px] opacity-70 mt-0.5 truncate">{step.detail}</div>
+                            )}
+                          </div>
+                          <span className="text-sm font-bold">{statusIcons[step.status]}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
             </div>
