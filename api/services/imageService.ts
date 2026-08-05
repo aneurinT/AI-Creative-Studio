@@ -725,7 +725,11 @@ export async function analyzeImageWithText(request: {
   } else if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
     // 远程 URL → 下载后转 base64
     try {
-      const resp = await fetch(imageUrl);
+      const resp = await fetch(imageUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+      });
       if (resp.ok) {
         const contentType = resp.headers.get('content-type') || '';
         const extMatch = contentType.match(/image\/(\w+)/);
@@ -734,9 +738,11 @@ export async function analyzeImageWithText(request: {
         }
         const buffer = Buffer.from(await resp.arrayBuffer());
         imageBase64 = buffer.toString('base64');
+      } else {
+        console.warn(`[analyzeImageWithText] Remote image download failed: HTTP ${resp.status} for ${imageUrl.substring(0, 80)}`);
       }
     } catch (e) {
-      console.warn('[analyzeImageWithText] Failed to download remote image:', (e as Error).message);
+      console.warn('[analyzeImageWithText] Failed to download remote image:', (e as Error).message, 'URL:', imageUrl.substring(0, 80));
     }
   } else {
     // 本地文件路径：/images/xxx 或 /uploads/xxx
