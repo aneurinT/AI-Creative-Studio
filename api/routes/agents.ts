@@ -2,6 +2,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { REASONING_MODEL, REASONING_API, getReasoningApiKey, REASONING_FALLBACK_MODEL, REASONING_FALLBACK_API, getReasoningFallbackApiKey } from '../services/llmConfig.js';
+import { recordAgentTurn, checkAndCompress, getAgentContext, remember, recall } from '../services/agentMemory.js';
 
 const execAsync = promisify(exec);
 const router = Router();
@@ -181,7 +182,7 @@ async function callReasoningAgent(message: string, systemPrompt: string, session
 }
 
 /** 异步调用 Hermes Python CLI */
-async function callHermesWithContext(message: string, systemPrompt: string, sessionId: string, history?: any[]): Promise<string> {
+async function callHermesWithContext(message: string, systemPrompt: string, sessionId: string, history?: any[], agentName?: string): Promise<string> {
   // 获取 Agent 上下文（含历史任务记录）
   const context = agentContexts.get(sessionId);
   const prevResult = context?.finalResult ? JSON.stringify(context.finalResult).substring(0, 500) : '';
@@ -190,11 +191,28 @@ async function callHermesWithContext(message: string, systemPrompt: string, sess
   // 构建带上下文的 messages
   const contextMessages: any[] = [{ role: 'system', content: systemPrompt }];
 
+  // 注入长期记忆（跨会话知识）
+  if (agentName) {
+    const relevantMemories = await recall({ agentName, query: message, limit: 3 });
+    if (relevantMemories.length > 0) {
+      const memoryContext = '【历史经验】\n' + relevantMemories.map((m, i) => `${i + 1}. ${m.content}`).join('\n');
+      contextMessages.push({ role: 'system', content: memoryContext });
+    }
+  }
+
+  // 添加短期记忆（会话内上下文）
+  if (agentName) {
+    const shortCtx = getAgentContext(sessionId, agentName);
+    if (shortCtx.length > 0) {
+      contextMessages.push(...shortCtx.slice(-10));
+    }
+  }
+
   // 添加历史对话
   if (history && history.length > 0) {
-    const recent = history.slice(-8).map((m: any) => ({
+    const recent = history.slice(-15).map((m: any) => ({
       role: m.role === 'user' ? 'user' : 'assistant' as const,
-      content: typeof m.content === 'string' ? m.content.substring(0, 300) : '',
+      content: typeof m.content === 'string' ? m.content.substring(0, 500) : '',
     }));
     contextMessages.push(...recent);
   }
@@ -450,7 +468,7 @@ router.post('/story/write', async (req: Request, res: Response) => {
       reasoningTrace = reasoningResult.reasoning;
     } else {
       // 降级到指令模型
-      hermesResponse = await callHermesWithContext(message, config.systemPrompt, sessionId, history);
+      hermesResponse = await callHermesWithContext(message, config.systemPrompt, sessionId, history, config.role);
     }
     
     let script = '';
@@ -459,6 +477,12 @@ router.post('/story/write', async (req: Request, res: Response) => {
     } else {
       script = generateMockScript(message);
     }
+
+    // 记录短期记忆
+    recordAgentTurn({ sessionId, agentName: config.role, turnIndex: context.thoughts.length, role: 'user', content: message });
+    recordAgentTurn({ sessionId, agentName: config.role, turnIndex: context.thoughts.length + 1, role: 'assistant', content: script.substring(0, 500), summary: script.substring(0, 100) });
+    // 检查并压缩
+    checkAndCompress(sessionId, config.role).catch(() => {});
 
     context.thoughts.push({
       agentName: config.name,
@@ -537,9 +561,13 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
       hermesResponse = reasoningResult.content;
       reasoningTrace = reasoningResult.reasoning;
     } else {
-      hermesResponse = await callHermesWithContext(script, config.systemPrompt, sessionId, history);
+      hermesResponse = await callHermesWithContext(script, config.systemPrompt, sessionId, history, config.role);
     }
     
+    // 短期记忆
+    recordAgentTurn({ sessionId, agentName: config.role, turnIndex: 0, role: 'user', content: script?.substring(0, 300) });
+    checkAndCompress(sessionId, config.role).catch(() => {});
+
     let analysis = {};
     if (hermesResponse) {
       try {
@@ -635,6 +663,10 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
       hermesResponse = await callHermesWithContext(message, config.systemPrompt, sessionId, history);
     }
     
+    // 短期记忆
+    recordAgentTurn({ sessionId, agentName: config.role, turnIndex: 0, role: 'user', content: message?.substring(0, 300) });
+    checkAndCompress(sessionId, config.role).catch(() => {});
+
     let analysis = {};
     if (hermesResponse) {
       try {
@@ -725,9 +757,13 @@ router.post('/video/generate', async (req: Request, res: Response) => {
       hermesResponse = reasoningResult.content;
       reasoningTrace = reasoningResult.reasoning;
     } else {
-      hermesResponse = await callHermesWithContext(script, config.systemPrompt, sessionId, history);
+      hermesResponse = await callHermesWithContext(script, config.systemPrompt, sessionId, history, config.role);
     }
     
+    // 短期记忆
+    recordAgentTurn({ sessionId, agentName: config.role, turnIndex: 0, role: 'user', content: script?.substring(0, 300) });
+    checkAndCompress(sessionId, config.role).catch(() => {});
+
     let analysis = {};
     if (hermesResponse) {
       try {

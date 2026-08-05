@@ -341,10 +341,65 @@ export default function RemoveBg() {
                 </button>
               </div>
             )}
+          </div>
 
-            {error && (
-              <div className="mt-4 px-4 py-3 bg-red-50 text-red-600 rounded-xl text-sm">
-                {error}
+          <div className="bg-white rounded-2xl shadow-lg p-6">
+            <h2 className="text-lg font-semibold text-gray-700 mb-4 flex items-center gap-2">
+              <ImageIcon className="w-5 h-5 text-purple-500" />
+              处理结果
+            </h2>
+
+            {!processedImage ? (
+              <div className="border-2 border-dashed border-gray-200 rounded-xl p-12 text-center bg-gray-50">
+                <ImageIcon className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+                <p className="text-gray-400">处理后的图片将在这里显示</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="relative rounded-xl overflow-hidden bg-gray-50">
+                  <img
+                    src={processedImage}
+                    alt="Processed"
+                    className="w-full h-auto max-h-96 object-contain"
+                  />
+                  {fillProgress > 0 && fillProgress < 100 && (
+                    <div className="absolute inset-0 bg-black/30 flex items-center justify-center">
+                      <div className="text-white">
+                        <Loader2 className="w-8 h-8 animate-spin mx-auto mb-2" />
+                        <span>填充中 {Math.round(fillProgress)}%</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={handleDownload}
+                    className="flex-1 py-2.5 bg-green-500 text-white rounded-xl font-medium hover:bg-green-600 transition-all flex items-center justify-center gap-2"
+                  >
+                    <Download className="w-4 h-4" />
+                    下载图片
+                  </button>
+                  <button
+                    onClick={handleRemoveBg}
+                    disabled={isProcessing}
+                    className="py-2.5 px-4 bg-gray-100 text-gray-600 rounded-xl font-medium hover:bg-gray-200 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    重新处理
+                  </button>
+                </div>
+
+                {fillStats.rate > 0 && (
+                  <div className="p-4 bg-blue-50 rounded-xl">
+                    <p className="text-sm text-blue-600 font-medium mb-2">填充统计</p>
+                    <div className="grid grid-cols-3 gap-4 text-center">
+                      <div><p className="text-xl font-bold text-blue-700">{fillStats.rate}%</p><p className="text-xs text-blue-500">填充率</p></div>
+                      <div><p className="text-xl font-bold text-blue-700">{fillStats.filled.toLocaleString()}</p><p className="text-xs text-blue-500">有效像素</p></div>
+                      <div><p className="text-xl font-bold text-blue-700">{fillStats.total.toLocaleString()}</p><p className="text-xs text-blue-500">总像素</p></div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -629,75 +684,6 @@ export default function RemoveBg() {
             )}
           </div>
 
-          <div className="bg-white rounded-2xl shadow-lg p-6">
-            <h2 className="text-lg font-semibold text-gray-700 mb-4 flex items-center gap-2">
-              <ImageIcon className="w-5 h-5 text-purple-500" />
-              处理结果
-            </h2>
-
-            {!processedImage ? (
-              <div className="border-2 border-dashed border-gray-200 rounded-xl p-12 text-center bg-gray-50">
-                <ImageIcon className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-                <p className="text-gray-400">处理后的图片将在这里显示</p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                <div className="relative rounded-xl overflow-hidden bg-gray-50">
-                  <img
-                    src={processedImage}
-                    alt="Processed"
-                    className="w-full h-auto max-h-96 object-contain"
-                  />
-                  {fillProgress > 0 && fillProgress < 100 && (
-                    <div className="absolute inset-0 bg-black/30 flex items-center justify-center">
-                      <div className="text-white">
-                        <Loader2 className="w-8 h-8 animate-spin mx-auto mb-2" />
-                        <span>填充中 {Math.round(fillProgress)}%</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <div className="flex gap-3">
-                  <button
-                    onClick={handleDownload}
-                    className="flex-1 py-2.5 bg-green-500 text-white rounded-xl font-medium hover:bg-green-600 transition-all flex items-center justify-center gap-2"
-                  >
-                    <Download className="w-4 h-4" />
-                    下载图片
-                  </button>
-                  <button
-                    onClick={handleRemoveBg}
-                    disabled={isProcessing}
-                    className="py-2.5 px-4 bg-gray-100 text-gray-600 rounded-xl font-medium hover:bg-gray-200 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
-                  >
-                    <RefreshCw className="w-4 h-4" />
-                    重新处理
-                  </button>
-                </div>
-
-                {fillStats.rate > 0 && (
-                  <div className="p-4 bg-blue-50 rounded-xl">
-                    <p className="text-sm text-blue-600 font-medium mb-2">填充统计</p>
-                    <div className="grid grid-cols-3 gap-4 text-center">
-                      <div>
-                        <p className="text-xl font-bold text-blue-700">{fillStats.rate}%</p>
-                        <p className="text-xs text-blue-500">填充率</p>
-                      </div>
-                      <div>
-                        <p className="text-xl font-bold text-blue-700">{fillStats.filled.toLocaleString()}</p>
-                        <p className="text-xs text-blue-500">有效像素</p>
-                      </div>
-                      <div>
-                        <p className="text-xl font-bold text-blue-700">{fillStats.total.toLocaleString()}</p>
-                        <p className="text-xs text-blue-500">总像素</p>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
         </div>
       </div>
     </div>

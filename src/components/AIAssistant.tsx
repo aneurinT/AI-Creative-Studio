@@ -136,6 +136,7 @@ export default function AIAssistant() {
   const [imageUrlInput, setImageUrlInput] = useState('');
   const [showImageUrlInput, setShowImageUrlInput] = useState(false);
   const [urlPreviewError, setUrlPreviewError] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
 
   useEffect(() => {
     initSession();
@@ -668,6 +669,69 @@ export default function AIAssistant() {
   }
 
   async function callHermesAgent(message: string, history: ChatMessage[], signal?: AbortSignal): Promise<{ action?: string; params?: Record<string, any>; response: string; reasoning?: string; modelUsed?: string }> {
+    // 优先使用 SSE 流式模式
+    try {
+      const historyJson = encodeURIComponent(JSON.stringify(
+        history.slice(-10).map(m => ({ role: m.role, content: m.content }))
+      ));
+      const url = `/api/hermes/chat/stream?message=${encodeURIComponent(message)}&history=${historyJson}&sessionId=${currentSession?.id || ''}`;
+
+      const sseResponse = await fetch(url, {
+        headers: { ...authHeaders(), 'Accept': 'text/event-stream' },
+        signal,
+      });
+
+      if (!sseResponse.ok) throw new Error(`SSE HTTP ${sseResponse.status}`);
+
+      const reader = sseResponse.body?.getReader();
+      if (!reader) throw new Error('No stream reader');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let fullText = '';
+      let resultData: any = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        let currentEvent = '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            try {
+              const parsed = JSON.parse(line.slice(6).trim());
+              if (currentEvent === 'token') {
+                fullText += parsed.content || '';
+              } else if (currentEvent === 'result') {
+                resultData = parsed;
+              }
+            } catch { /* skip */ }
+          }
+        }
+      }
+
+      if (resultData) {
+        return {
+          action: resultData.action,
+          params: resultData.params,
+          response: resultData.response || fullText || '我理解你的需求了，正在帮你处理...',
+          modelUsed: 'sse-stream',
+        };
+      }
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') {
+        return { response: '我理解你的需求了，正在帮你处理...' };
+      }
+      console.warn('[SSE] Stream failed, falling back to POST:', (err as Error).message);
+    }
+
+    // 回退到传统 POST 模式
     try {
       const response = await fetch('/api/hermes/chat', {
         method: 'POST',

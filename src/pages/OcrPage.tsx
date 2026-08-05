@@ -268,48 +268,52 @@ export default function OcrPage() {
       targetIds.has(i.id) ? { ...i, status: 'loading', error: undefined } : i
     ));
 
-    try {
-      const response = await fetch('/api/ocr/recognize-batch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageUrls: idleImages.map(i => i.url) }),
-      });
-      const data = await response.json();
+    // 逐个串行调用，使用 index 匹配，避免 blob URL 不一致问题
+    let successCount = 0;
+    let totalChars = 0;
 
-      if (data.success && data.results) {
-        setBatchSummary(data.summary);
-        // 构建 url -> result 映射
-        const resultMap = new Map<string, any>();
-        data.results.forEach((r: any) => {
-          resultMap.set(r.imageUrl, r);
+    for (let idx = 0; idx < idleImages.length; idx++) {
+      const img = idleImages[idx];
+
+      try {
+        const response = await fetch('/api/ocr/recognize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ imageUrl: img.url }),
         });
+        const data = await response.json();
 
-        setImages(prev => prev.map(i => {
-          if (!targetIds.has(i.id)) return i;
-          const matched = resultMap.get(i.url);
-          if (matched) {
-            return {
-              ...i,
-              status: matched.success ? 'done' : 'error',
-              ocrResult: matched.success ? matched.result : undefined,
-              error: matched.success ? undefined : (matched.error || '识别失败'),
-              model: matched.model,
-            };
-          }
-          return { ...i, status: 'error', error: '未收到识别结果' };
-        }));
-      } else {
+        if (data.success && data.result) {
+          successCount++;
+          totalChars += data.result.totalChars || 0;
+          setImages(prev => prev.map(i =>
+            i.id === img.id
+              ? { ...i, status: 'done', ocrResult: data.result, model: data.model }
+              : i
+          ));
+        } else {
+          setImages(prev => prev.map(i =>
+            i.id === img.id
+              ? { ...i, status: 'error', error: data.error || '识别失败' }
+              : i
+          ));
+        }
+      } catch (err) {
         setImages(prev => prev.map(i =>
-          targetIds.has(i.id) ? { ...i, status: 'error', error: data.error || '批量识别失败' } : i
+          i.id === img.id
+            ? { ...i, status: 'error', error: '网络请求失败' }
+            : i
         ));
       }
-    } catch (err) {
-      setImages(prev => prev.map(i =>
-        targetIds.has(i.id) ? { ...i, status: 'error', error: '网络请求失败' } : i
-      ));
-    } finally {
-      setIsBatchProcessing(false);
     }
+
+    setBatchSummary({
+      total: idleImages.length,
+      successCount,
+      failCount: idleImages.length - successCount,
+      totalChars,
+    });
+    setIsBatchProcessing(false);
   }, [images]);
 
   // ==================== 复制 ====================
@@ -453,68 +457,105 @@ export default function OcrPage() {
           </div>
         )}
 
-        {/* 预览视图（默认） */}
+        {/* 预览视图（默认） — 有表格优先展示完整表格，无表格展示文本 */}
         {viewMode === 'preview' && (
           <>
-            {r.tables && r.tables.length > 0 && (
-              <div className="space-y-2">
+            {/* 有表格 → 优先展示完整表格 */}
+            {r.tables && r.tables.length > 0 ? (
+              <div className="space-y-3">
                 {r.tables.map((table, tIdx) => (
                   <div key={tIdx} className="border border-gray-200 rounded-lg overflow-hidden">
-                    <div className="overflow-x-auto">
+                    <div className="px-3 py-1.5 bg-cyan-50 border-b flex items-center gap-2">
+                      <Table className="w-3.5 h-3.5 text-cyan-600" />
+                      <span className="text-xs font-semibold text-cyan-800">
+                        {table.caption || `表格 ${tIdx + 1}`}
+                      </span>
+                      {table.position && <span className="text-[10px] text-cyan-500">({table.position})</span>}
+                    </div>
+                    <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
                       <table className="w-full text-xs">
-                        <thead>
-                          <tr className="bg-gray-50">
+                        <thead className="sticky top-0 z-10">
+                          <tr className="bg-cyan-50">
                             {table.headers.map((h, hIdx) => (
-                              <th key={hIdx} className="px-3 py-1.5 text-left font-semibold text-gray-700 border-b">{h}</th>
+                              <th key={hIdx} className="px-3 py-2 text-left font-semibold text-cyan-800 border-b border-cyan-100 whitespace-nowrap">{h}</th>
                             ))}
                           </tr>
                         </thead>
                         <tbody>
-                          {table.rows.slice(0, 5).map((row, rIdx) => (
-                            <tr key={rIdx}>
+                          {table.rows.map((row, rIdx) => (
+                            <tr key={rIdx} className={rIdx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
                               {row.map((cell, cIdx) => (
-                                <td key={cIdx} className="px-3 py-1.5 text-gray-600 border-b border-gray-50">{cell}</td>
+                                <td key={cIdx} className="px-3 py-1.5 text-gray-600 border-b border-gray-100 whitespace-nowrap">{cell}</td>
                               ))}
                             </tr>
                           ))}
                         </tbody>
                       </table>
                     </div>
-                    {table.rows.length > 5 && (
-                      <div className="px-3 py-1 text-xs text-gray-400 bg-gray-50 text-center">
-                        还有 {table.rows.length - 5} 行...（切换到"表格"视图查看完整内容）
+                    <div className="px-3 py-1 text-[10px] text-gray-400 bg-gray-50 text-right">
+                      {table.rows.length} 行 × {table.headers.length} 列
+                    </div>
+                  </div>
+                ))}
+
+                {/* 有表格时文本折叠为摘要 */}
+                {r.fullText && (
+                  <details className="group">
+                    <summary className="flex items-center gap-1.5 cursor-pointer text-xs text-gray-500 hover:text-gray-700 py-1 select-none">
+                      <ChevronDown className="w-3 h-3 transition-transform group-open:rotate-180" />
+                      查看原文内容（{r.totalChars?.toLocaleString() || r.fullText.length} 字符）
+                    </summary>
+                    <div className="relative mt-2">
+                      <div className="p-3 bg-gray-50 border border-gray-200 rounded-lg max-h-48 overflow-y-auto">
+                        <pre className="text-sm text-gray-600 whitespace-pre-wrap font-sans leading-relaxed">{r.fullText}</pre>
                       </div>
-                    )}
+                      <button
+                        onClick={() => handleCopy(r.fullText!, `text-${img.id}`)}
+                        className="absolute top-2 right-2 p-1.5 bg-white border border-gray-200 rounded-md hover:bg-gray-50 transition-colors"
+                      >
+                        {copiedId === `text-${img.id}` ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5 text-gray-400" />}
+                      </button>
+                    </div>
+                  </details>
+                )}
+              </div>
+            ) : (
+              /* 无表格 → 直接展示完整文本 */
+              <>
+                {r.fullText ? (
+                  <div className="relative">
+                    <div className="p-4 bg-white border border-gray-200 rounded-lg max-h-[500px] overflow-y-auto">
+                      <pre className="text-sm text-gray-700 whitespace-pre-wrap font-sans leading-relaxed">{r.fullText}</pre>
+                    </div>
+                    <button
+                      onClick={() => handleCopy(r.fullText!, `text-${img.id}`)}
+                      className="absolute top-2 right-2 p-1.5 bg-white border border-gray-200 rounded-md hover:bg-gray-50 transition-colors"
+                    >
+                      {copiedId === `text-${img.id}` ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5 text-gray-400" />}
+                    </button>
                   </div>
-                ))}
-              </div>
-            )}
+                ) : (
+                  <p className="text-sm text-gray-400 text-center py-6">未识别到文字内容</p>
+                )}
 
-            {r.fullText && (
-              <div className="relative">
-                <div className="p-3 bg-white border border-gray-200 rounded-lg max-h-64 overflow-y-auto">
-                  <pre className="text-sm text-gray-700 whitespace-pre-wrap font-sans leading-relaxed">{r.fullText}</pre>
-                </div>
-                <button
-                  onClick={() => handleCopy(r.fullText!, `text-${img.id}`)}
-                  className="absolute top-2 right-2 p-1.5 bg-white border border-gray-200 rounded-md hover:bg-gray-50 transition-colors"
-                >
-                  {copiedId === `text-${img.id}` ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5 text-gray-400" />}
-                </button>
-              </div>
-            )}
-
-            {r.textBlocks && r.textBlocks.length > 0 && (
-              <div className="space-y-1">
-                <p className="text-xs text-gray-500 font-medium">文字分布：</p>
-                {r.textBlocks.map((block, i) => (
-                  <div key={i} className="flex items-start gap-1.5 text-xs py-1 px-2.5 bg-gray-50 rounded">
-                    <span className="px-1.5 py-0.5 bg-gray-200 rounded text-gray-500 font-mono shrink-0">{block.position}</span>
-                    <span className="px-1.5 py-0.5 bg-gray-200 rounded text-gray-500 shrink-0 text-[10px]">{block.type}</span>
-                    <span className="text-gray-600">{block.text}</span>
-                  </div>
-                ))}
-              </div>
+                {r.textBlocks && r.textBlocks.length > 0 && (
+                  <details className="group mt-2">
+                    <summary className="flex items-center gap-1.5 cursor-pointer text-xs text-gray-500 hover:text-gray-700 py-1 select-none">
+                      <ChevronDown className="w-3 h-3 transition-transform group-open:rotate-180" />
+                      查看文字分布（{r.textBlocks.length} 块）
+                    </summary>
+                    <div className="space-y-1 mt-2">
+                      {r.textBlocks.map((block, i) => (
+                        <div key={i} className="flex items-start gap-1.5 text-xs py-1 px-2.5 bg-gray-50 rounded">
+                          <span className="px-1.5 py-0.5 bg-gray-200 rounded text-gray-500 font-mono shrink-0">{block.position}</span>
+                          <span className="px-1.5 py-0.5 bg-gray-200 rounded text-gray-500 shrink-0 text-[10px]">{block.type}</span>
+                          <span className="text-gray-600">{block.text}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+              </>
             )}
           </>
         )}

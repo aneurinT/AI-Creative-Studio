@@ -6,6 +6,9 @@ import { analyzeImageWithText } from '../services/imageService.js';
 import { reviewUserIntent, findMemoryMatch, recordMemory } from '../services/reviewAgent.js';
 import { reviewVideoScript, reviewVideoParams, quickScoreVideoPrompt, reviewVideoFinal, analyzeFailure } from '../services/videoReviewAgent.js';
 import { retrievePromptTemplate, retrieveVisualStyle, buildRAGContext, semanticRAG, seedKnowledgeBase } from '../services/ragKnowledge.js';
+import { setSSEHeaders, sendSSEEvent, sendSSEEnd, sendSSEError, streamLLM } from '../services/sseService.js';
+import { logUserAction, logAgentOperation } from '../services/loggerService.js';
+import { addOperationLog } from '../services/database.js';
 
 import { CHAT_MODEL, CHAT_API, getChatApiKey, CHAT_FALLBACK_MODEL, CHAT_FALLBACK_API, getChatFallbackApiKey, REASONING_MODEL, REASONING_API, getReasoningApiKey, REASONING_FALLBACK_MODEL, REASONING_FALLBACK_API, getReasoningFallbackApiKey } from '../services/llmConfig.js';
 
@@ -723,6 +726,67 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
       action: fallbackResult.action,
       params: fallbackResult.params,
     });
+  }
+});
+
+/**
+ * SSE 流式聊天端点
+ * GET /api/hermes/chat/stream?message=xxx&sessionId=xxx&history=[...]
+ */
+router.get('/chat/stream', async (req: Request, res: Response): Promise<void> => {
+  const startTime = Date.now();
+  const message = req.query.message as string;
+  if (!message) {
+    res.status(400).json({ success: false, error: 'message is required' });
+    return;
+  }
+
+  setSSEHeaders(res);
+
+  try {
+    const systemPrompt = `你是智能 AI 助手，请充分理解用户的每一句话。不要被预设的功能列表限制。你需要完整理解用户需求并自由决定任务类型。输出 JSON：{"action":"任务类型","params":{"具体参数"},"response":"你的分析回应","contextAnalysis":"关联分析"}`;
+
+    const historyStr = (req.query.history as string) || '[]';
+    let history: any[] = [];
+    try { history = JSON.parse(historyStr); } catch {}
+
+    const messages: Array<{ role: string; content: string }> = [
+      { role: 'system', content: systemPrompt },
+      ...history.slice(-5).map((m: any) => ({ role: m.role, content: m.content?.substring(0, 500) || '' })),
+      { role: 'user', content: message },
+    ];
+
+    sendSSEEvent(res, 'status', { status: 'thinking', message: '正在分析你的需求...' });
+
+    const fullResponse = await streamLLM(res, messages, { temperature: 0.7, maxTokens: 500 });
+    const parsed = parseHermesAction(fullResponse, message);
+
+    sendSSEEvent(res, 'result', {
+      action: parsed.action,
+      params: parsed.params,
+      response: fullResponse,
+      contextAnalysis: '',
+    });
+
+    addOperationLog({
+      level: 'INFO', category: 'api-request',
+      session_id: (req.query.sessionId as string) || '',
+      operation: 'SSE 流式聊天',
+      detail: `action=${parsed.action}, ${message?.substring(0, 80)}`,
+      duration_ms: Date.now() - startTime,
+      result: 'success',
+    });
+
+    sendSSEEnd(res);
+  } catch (error) {
+    addOperationLog({
+      level: 'ERROR', category: 'api-request',
+      operation: 'SSE 流式聊天失败',
+      detail: (error as Error).message?.substring(0, 200),
+      duration_ms: Date.now() - startTime,
+      result: 'failure', error_text: (error as Error).message,
+    });
+    sendSSEError(res, (error as Error).message);
   }
 });
 
