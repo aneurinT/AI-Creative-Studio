@@ -548,6 +548,38 @@ export default function AIAssistant() {
     return 'realistic';
   }
 
+  /**
+   * 格式化 AI 助手的回复内容，使其更自然、更有温度
+   * 避免生硬的"正在处理..."，而是加入上下文理解和思考过程
+   */
+  function formatAssistantResponse(rawResponse: string, action: string, params: Record<string, any>): string {
+    // 如果后端返回的回复已经比较自然，直接使用
+    if (rawResponse && rawResponse.length > 30 && !rawResponse.startsWith('正在')) {
+      return rawResponse;
+    }
+
+    // 为不同任务类型生成更自然的引导语
+    const style = params?.style ? STYLE_MAP[params.style] || params.style : '';
+    const duration = params?.duration ? `约${params.duration}秒` : '';
+
+    switch (action) {
+      case 'video':
+        return `好的，我来帮你创作一段${duration}的视频${style ? `，采用${style}风格` : ''}。\n\n我会先分析你的需求，然后生成合适的脚本和视觉方案。让我开始吧——`;
+      case 'image':
+        return `收到！我来为你生成一张${style ? `${style}风格的` : ''}图片。\n\n让我分析一下你想要的画面效果，然后调用图像模型来创作——`;
+      case 'modify-video':
+        return `明白了，我来帮你修改这段视频。让我看看需要调整哪些地方——`;
+      case 'modify-image':
+        return `好的，我来调整这张图片。让我理解你的修改需求——`;
+      case 'remove-bg':
+        return `没问题，我来帮你抠掉这张图片的背景，保留主体部分——`;
+      case 'compose':
+        return `好的，我来帮你合成这些素材——`;
+      default:
+        return rawResponse || '让我分析一下你的需求，然后帮你处理——';
+    }
+  }
+
   function recognizeAction(text: string): { action: string; params: Record<string, any> } {
     const lowerText = text.toLowerCase();
     
@@ -2077,11 +2109,12 @@ export default function AIAssistant() {
         if (m.id === thinkingId && m.isGenerating) {
           const d = new Date().getSeconds() % 3;
           const phases = [
-            '🧠 推理模型正在分析你的需求',
-            '🔍 推理模型正在识别意图',
-            '💡 推理模型正在规划方案',
+            '🧠 正在理解你的需求...',
+            '🔍 正在分析关键信息...',
+            '💡 正在构思最佳方案...',
+            '✨ 正在整理思路...',
           ];
-          const phase = phases[Math.floor(new Date().getSeconds() / 3) % phases.length];
+          const phase = phases[Math.floor(new Date().getSeconds() / 2) % phases.length];
           return { ...m, content: `${phase}${'.'.repeat(d + 1)}` };
         }
         return m;
@@ -2109,7 +2142,7 @@ export default function AIAssistant() {
           if (m.id === thinkingId) {
             return {
               ...m,
-              content: `🧠 **推理模型分析完成**（${hermesResult.modelUsed === 'reasoning' ? 'DeepSeek-R1 / GLM-Z1' : 'AI模型'}）`,
+              content: `💭 **已完成需求分析**（${hermesResult.modelUsed === 'reasoning' ? 'DeepSeek-R1 / GLM-Z1 深度推理' : 'AI 模型理解'}）`,
               isGenerating: false,
               reasoning: hermesResult.reasoning,
               modelUsed: hermesResult.modelUsed,
@@ -2166,7 +2199,7 @@ export default function AIAssistant() {
       const assistantMessage: ChatMessage = {
         id: `assistant-${Date.now()}`,
         role: 'assistant',
-        content: hermesResult.response + reviewCorrection,
+        content: formatAssistantResponse(hermesResult.response, actionResult.action, actionResult.params) + reviewCorrection,
         actionType: actionResult.action as any,
         params: actionResult.params,
         timestamp: Date.now(),
@@ -2835,72 +2868,52 @@ export default function AIAssistant() {
                 </div>
               )}
 
-              {/* Agent 思考流程（故事创作专家/视频制作专家/图像创作专家的步骤） */}
+              {/* Agent 思考流程 — 默认展开展示每个 Agent 的思考过程 */}
               {message.agentThoughts && message.agentThoughts.length > 0 && (
-                <div className="mt-3">
-                  <button
-                    onClick={() => toggleThoughts(message.id)}
-                    className="flex items-center gap-1 text-xs text-purple-600 hover:text-purple-700 transition-colors font-medium"
-                  >
-                    {expandedThoughts.has(message.id) ? (
-                      <>
-                        <ChevronUp className="w-4 h-4" />
-                        收起思考流程
-                      </>
-                    ) : (
-                      <>
-                        <ChevronDown className="w-4 h-4" />
-                        📋 查看AI思考流程（{message.agentThoughts.length} 步）
-                      </>
-                    )}
-                  </button>
-                  
-                  {expandedThoughts.has(message.id) && (
-                    <div className="mt-2 space-y-2">
-                      {message.agentThoughts.map((thought, index) => {
-                        const isLast = index === message.agentThoughts!.length - 1;
-                        const stepColor = thought.action === 'script_generated' || thought.action === 'parameters_extracted'
-                          ? 'border-green-200 bg-green-50'
-                          : 'border-blue-200 bg-blue-50';
-                        const dotColor = thought.action === 'script_generated' || thought.action === 'parameters_extracted'
-                          ? 'bg-green-500'
-                          : 'bg-blue-500';
-                        const stepIcon = index === 0 ? '🔍' : index === 1 ? '⚙️' : '✅';
+                <div className="mt-3 border border-purple-200 rounded-xl overflow-hidden bg-white">
+                  <div className="px-3 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border-b border-purple-100 flex items-center gap-2">
+                    <Brain className="w-4 h-4 text-purple-500" />
+                    <span className="text-xs font-semibold text-purple-700">AI 思考过程</span>
+                    <span className="text-[10px] text-purple-400 ml-auto">{message.agentThoughts.length} 个步骤</span>
+                  </div>
+                  <div className="p-3 space-y-2">
+                    {message.agentThoughts.map((thought, index) => {
+                      const isLast = index === message.agentThoughts!.length - 1;
+                      const isComplete = thought.action === 'script_generated' || thought.action === 'parameters_extracted';
+                      const stepColor = isComplete ? 'border-green-200 bg-green-50/50' : 'border-blue-200 bg-blue-50/50';
+                      const dotColor = isComplete ? 'bg-green-500' : 'bg-blue-500';
+                      const stepLabel = index === 0 ? '理解需求' : index === message.agentThoughts!.length - 1 ? '输出结果' : '分析处理';
 
-                        return (
-                          <div key={index} className="flex gap-3">
-                            {/* 左侧步骤连线 */}
-                            <div className="flex flex-col items-center">
-                              <div className={`w-6 h-6 rounded-full ${dotColor} flex items-center justify-center text-white text-xs font-bold`}>
-                                {index + 1}
-                              </div>
-                              {!isLast && (
-                                <div className="w-0.5 flex-1 min-h-[20px] bg-gray-200 my-0.5" />
-                              )}
+                      return (
+                        <div key={index} className="flex gap-2.5">
+                          {/* 左侧步骤指示器 */}
+                          <div className="flex flex-col items-center pt-0.5">
+                            <div className={`w-5 h-5 rounded-full ${dotColor} flex items-center justify-center text-white text-[10px] font-bold shadow-sm`}>
+                              {index + 1}
                             </div>
-                            {/* 右侧步骤内容 */}
-                            <div className={`flex-1 p-3 rounded-lg border ${stepColor} ${isLast ? 'mb-0' : 'mb-0'}`}>
-                              <div className="flex items-center gap-2 mb-1.5">
-                                <span className="text-sm">{stepIcon}</span>
-                                <span className={`px-1.5 py-0.5 text-xs rounded font-medium ${getAgentColor(thought.agentName)}`}>
-                                  {thought.agentName}
-                                </span>
-                                <span className="text-xs text-gray-400">第 {thought.step} 步</span>
-                              </div>
-                              <p className="text-xs text-gray-700 leading-relaxed">{thought.thought}</p>
-                              {thought.output && (
-                                <div className="mt-2 pt-2 border-t border-gray-200">
-                                  <p className="text-xs text-gray-500 font-mono whitespace-pre-wrap break-all">
-                                    {thought.output}
-                                  </p>
-                                </div>
-                              )}
-                            </div>
+                            {!isLast && <div className="w-0.5 flex-1 min-h-[16px] bg-gradient-to-b from-gray-200 to-gray-100 my-0.5" />}
                           </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                          {/* 右侧步骤内容 */}
+                          <div className={`flex-1 p-2.5 rounded-lg border ${stepColor} transition-colors`}>
+                            <div className="flex items-center gap-1.5 mb-1">
+                              <span className={`px-1.5 py-0.5 text-[10px] rounded-full font-medium ${getAgentColor(thought.agentName)}`}>
+                                {thought.agentName}
+                              </span>
+                              <span className="text-[10px] text-gray-400">{stepLabel}</span>
+                            </div>
+                            <p className="text-xs text-gray-700 leading-relaxed">{thought.thought}</p>
+                            {thought.output && (
+                              <div className="mt-1.5 pt-1.5 border-t border-gray-100">
+                                <p className="text-[11px] text-gray-500 font-mono whitespace-pre-wrap break-all line-clamp-3">
+                                  {thought.output}
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
 
