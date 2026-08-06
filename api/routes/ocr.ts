@@ -3,6 +3,82 @@ import { analyzeImageWithText } from '../services/imageService.js';
 
 const router = Router();
 
+/** 获取图片 base64 数据（处理各种 URL 格式） */
+async function getImageBase64(imageUrl: string): Promise<{ mime: string; base64: string } | null> {
+  // 直接是 base64
+  if (imageUrl.startsWith('data:image/')) {
+    const match = imageUrl.match(/^data:image\/(\w+);base64,(.+)$/);
+    if (match) return { mime: match[1], base64: match[2] };
+    return null;
+  }
+  // 远程 URL — 下载
+  if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
+    try {
+      const resp = await fetch(imageUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; OCRBot/1.0)' },
+        signal: AbortSignal.timeout(30000),
+      });
+      if (!resp.ok) return null;
+      const buf = Buffer.from(await resp.arrayBuffer());
+      return { mime: 'png', base64: buf.toString('base64') };
+    } catch { return null; }
+  }
+  // 本地文件
+  try {
+    const fs = await import('fs');
+    const path = await import('path');
+    const { fileURLToPath } = await import('url');
+    const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    const filePath = imageUrl.startsWith('/') ? path.join(__dirname, '..', imageUrl) : imageUrl;
+    if (!fs.existsSync(filePath)) return null;
+    const buf = fs.readFileSync(filePath);
+    return { mime: 'png', base64: buf.toString('base64') };
+  } catch { return null; }
+}
+
+/** 本地 OCR 降级方案：调用 ocr.space 免费 API */
+async function localOcr(imageUrl: string): Promise<{ success: boolean; result?: any; model?: string; error?: string }> {
+  console.log('[OCR] 大模型不可用，降级到 ocr.space 本地识别');
+  try {
+    const apiKey = process.env.OCR_SPACE_API_KEY || 'helloworld';
+    const resp = await fetch('https://api.ocr.space/parse/image', {
+      method: 'POST',
+      headers: { 'apikey': apiKey, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ url: imageUrl, language: 'chs,eng', isOverlayRequired: 'true', OCREngine: '2' }).toString(),
+      signal: AbortSignal.timeout(30000),
+    });
+    if (!resp.ok) return { success: false, error: `OCR工具不可用(${resp.status})` };
+
+    const data = await resp.json() as any;
+    const parsed = data?.ParsedResults?.[0];
+    if (!parsed?.ParsedText?.trim()) return { success: false, error: 'OCR工具未检测到文字' };
+
+    const text = parsed.ParsedText;
+    const lines = text.split('\n').filter((l: string) => l.trim());
+    const words = parsed.TextOverlay?.Lines?.flatMap((l: any) => l.Words || []) || [];
+
+    return {
+      success: true,
+      model: 'ocr.space',
+      result: {
+        hasText: true,
+        language: 'auto',
+        fullText: text,
+        totalChars: text.length,
+        textBlocks: words.slice(0, 30).map((w: any, i: number) => ({
+          position: `(${w.Left},${w.Top})`,
+          type: '文字',
+          text: w.WordText || '',
+        })),
+        tables: [],
+        summary: `OCR工具识别：${lines.length}行，${text.length}字符`,
+      },
+    };
+  } catch (err) {
+    return { success: false, error: `本地OCR异常: ${(err as Error).message}` };
+  }
+}
+
 const OCR_PROMPT = `你是一个专业的OCR文字识别系统，使用智谱 glm-4v-flash 视觉模型。请仔细识别图片中的所有文字内容。
 
 ## 识别要求
@@ -47,57 +123,50 @@ const OCR_PROMPT = `你是一个专业的OCR文字识别系统，使用智谱 gl
 - fullText 字段保留原文的完整内容和格式
 - 严格输出纯JSON，不要包裹在markdown代码块中`;
 
-/** 单张图片 OCR 识别核心逻辑 */
+/** 单张图片 OCR 识别核心逻辑 — 大模型优先，失败降级到本地 OCR */
 async function recognizeSingleImage(imageUrl: string) {
-  // 截断日志中的 base64 数据避免日志过长
   const logUrl = imageUrl.startsWith('data:')
     ? `data:image/... (base64, ${imageUrl.length} chars)`
     : imageUrl.substring(0, 80);
-  console.log(`[OCR] glm-4v-flash 识别图片文字: ${logUrl}`);
+  console.log(`[OCR] 大模型识别: ${logUrl}`);
 
-  const result = await analyzeImageWithText({
-    imageUrl,
-    message: OCR_PROMPT,
-  });
+  // 步骤1：大模型识别（glm-4v-flash）
+  const result = await analyzeImageWithText({ imageUrl, message: OCR_PROMPT });
 
-  if (!result.success) {
-    const errorMsg = result.error || 'OCR识别失败';
-    // 如果是远程图片下载失败，给出更友好的提示
-    if (errorMsg === '无法读取图片文件' && imageUrl.startsWith('http')) {
-      return {
-        success: false,
-        error: '无法下载远程图片，请尝试将图片保存到本地后上传，或检查图片链接是否可公开访问',
-      };
+  if (result.success) {
+    const description = result.description || '';
+    const jsonStr = extractJson(description);
+
+    if (jsonStr) {
+      try {
+        const parsed = JSON.parse(jsonStr);
+        console.log(`[OCR] 大模型成功: ${parsed.language || '?'} | ${parsed.totalChars || 0}字 | ${parsed.tables?.length || 0}表格`);
+        return { success: true, result: parsed, model: 'glm-4v-flash' };
+      } catch { /* JSON 解析失败，继续走纯文本 */ }
     }
-    return { success: false, error: errorMsg };
+
+    // 纯文本回退
+    return {
+      success: true,
+      result: { hasText: true, language: 'auto', fullText: description, textBlocks: [], tables: [], totalChars: description.length, summary: 'OCR识别结果（纯文本）' },
+      model: 'glm-4v-flash',
+    };
   }
 
-  const description = result.description || '';
-  const jsonStr = extractJson(description);
+  const llmError = result.error || '大模型识别失败';
+  console.warn(`[OCR] 大模型失败: ${llmError}，降级到本地OCR`);
 
-  if (jsonStr) {
-    try {
-      const parsed = JSON.parse(jsonStr);
-      console.log(`[OCR] 识别成功: ${parsed.language || '?'} | ${parsed.totalChars || 0}字 | ${parsed.tables?.length || 0}个表格`);
-      return { success: true, result: parsed, model: 'glm-4v-flash' };
-    } catch (parseErr) {
-      console.warn('[OCR] JSON解析失败，尝试修复:', (parseErr as Error).message);
-    }
+  // 步骤2：降级到本地 OCR 工具
+  const localResult = await localOcr(imageUrl);
+  if (localResult.success) {
+    console.log(`[OCR] 本地OCR成功: ${localResult.result?.totalChars || 0}字`);
+    return localResult;
   }
 
-  // 回退：返回纯文本
+  // 全部失败
   return {
-    success: true,
-    result: {
-      hasText: true,
-      language: 'auto',
-      fullText: description || '未能识别文字内容',
-      textBlocks: [],
-      tables: [],
-      totalChars: (description || '').length,
-      summary: 'OCR识别结果（纯文本格式）',
-    },
-    model: 'glm-4v-flash',
+    success: false,
+    error: `大模型: ${llmError}; 本地OCR: ${localResult.error}`,
   };
 }
 
