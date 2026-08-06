@@ -9,6 +9,8 @@ import { retrievePromptTemplate, retrieveVisualStyle, buildRAGContext, semanticR
 import { setSSEHeaders, sendSSEEvent, sendSSEEnd, sendSSEError, streamLLM } from '../services/sseService.js';
 import { logUserAction, logAgentOperation } from '../services/loggerService.js';
 import { addOperationLog } from '../services/database.js';
+import { recall, remember, recordAgentTurn, checkAndCompress, getAgentContext } from '../services/agentMemory.js';
+import { toolRegistry } from '../services/toolRegistry.js';
 
 import { CHAT_MODEL, CHAT_API, getChatApiKey, CHAT_FALLBACK_MODEL, CHAT_FALLBACK_API, getChatFallbackApiKey, REASONING_MODEL, REASONING_API, getReasoningApiKey, REASONING_FALLBACK_MODEL, REASONING_FALLBACK_API, getReasoningFallbackApiKey } from '../services/llmConfig.js';
 
@@ -626,6 +628,17 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
     console.log(`[RAG] 来源: ${ragResult.source}, 模板: ${ragResult.template?.description || '无'}, 风格: ${ragResult.style?.name || '无'}`);
     const ragContext = buildRAGContext(message, ragResult.template, ragResult.style);
 
+    // 注入长期记忆上下文（跨会话知识召回）
+    const sessionId = (req as any).sessionId || 'default';
+    let memoryContext = '';
+    try {
+      const relevantMemories = await recall({ query: message, limit: 3 });
+      if (relevantMemories.length > 0) {
+        memoryContext = '【历史经验】\n' + relevantMemories.map((m, i) => `${i + 1}. ${m.content}`).join('\n');
+        console.log(`[Memory] 召回 ${relevantMemories.length} 条相关长期记忆`);
+      }
+    } catch (e) { /* 记忆召回失败不影响主流程 */ }
+
     // 优先使用推理模型进行深度意图分析（DeepSeek-R1 / GLM-Z1）
     const reasoningResult = await callReasoningLLM(message, history || []);
     if (reasoningResult) {
@@ -650,6 +663,14 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
       if (ragResult.style) { llmResult.params.style = ragResult.style.keywords[0] === '动漫' ? 'anime' : llmResult.params.style; }
       if (ragContext) { llmResult.params.ragContext = ragContext; }
       res.json({ success: true, response: llmResult.response, action: llmResult.action, params: llmResult.params, modelUsed: 'instruction' });
+
+      // 异步存储长期记忆（不阻塞响应）
+      remember({
+        sessionId, agentName: 'hermes',
+        category: 'user_intent',
+        content: `用户说"${message.substring(0, 100)}" → 识别为 ${llmResult.action}`,
+        importance: 0.4,
+      }).catch(() => {});
       return;
     }
 

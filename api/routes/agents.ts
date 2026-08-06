@@ -3,6 +3,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { REASONING_MODEL, REASONING_API, getReasoningApiKey, REASONING_FALLBACK_MODEL, REASONING_FALLBACK_API, getReasoningFallbackApiKey } from '../services/llmConfig.js';
 import { recordAgentTurn, checkAndCompress, getAgentContext, remember, recall } from '../services/agentMemory.js';
+import { toolRegistry } from '../services/toolRegistry.js';
 
 const execAsync = promisify(exec);
 const router = Router();
@@ -189,7 +190,10 @@ async function callHermesWithContext(message: string, systemPrompt: string, sess
   const taskHistorySummary = buildTaskHistorySummary(context);
 
   // 构建带上下文的 messages
-  const contextMessages: any[] = [{ role: 'system', content: systemPrompt }];
+  const enhancedSystemPrompt = systemPrompt + '\n\n## 可用工具\n' +
+    toolRegistry.list().map(t => `- **${t.name}**: ${t.description}`).join('\n') +
+    '\n\n你可以通过返回 JSON 中的 "action" 字段指定要调用的工具名。';
+  const contextMessages: any[] = [{ role: 'system', content: enhancedSystemPrompt }];
 
   // 注入长期记忆（跨会话知识）
   if (agentName) {

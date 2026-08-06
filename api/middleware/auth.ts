@@ -56,6 +56,8 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     '/api/generate/modify-image',
     '/api/chat/sessions',
     '/api/ocr/',
+    '/api/mcp/',
+    '/api/tools',
   ]
 
   if (publicPaths.some(p => req.path.startsWith(p))) {
