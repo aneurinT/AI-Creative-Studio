@@ -229,9 +229,12 @@ export default function OcrPage() {
     ));
 
     try {
+      const token = localStorage.getItem('auth_token');
+      const authHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) authHeaders['Authorization'] = `Bearer ${token}`;
       const response = await fetch('/api/ocr/recognize', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({ imageUrl: img.url }),
       });
       const data = await response.json();
@@ -287,9 +290,12 @@ export default function OcrPage() {
           console.warn(`[OCR] 图片 ${img.name} base64 过大(${(imageUrl.length / 1024 / 1024).toFixed(1)}MB)，可能导致识别失败`);
         }
 
+        const token = localStorage.getItem('auth_token');
+        const authHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (token) authHeaders['Authorization'] = `Bearer ${token}`;
         const response = await fetch('/api/ocr/recognize', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: authHeaders,
           body: JSON.stringify({ imageUrl }),
         });
         const data = await response.json();
