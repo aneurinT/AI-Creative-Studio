@@ -705,33 +705,80 @@ export async function analyzeImageWithText(request: {
   message: string;
 }): Promise<{ success: boolean; description?: string; action?: string; params?: Record<string, any>; error?: string }> {
   const { imageUrl, message } = request;
-  // 图片存储在不同位置，需要解析
-  let realPath = '';
-  if (imageUrl.startsWith('/images/')) {
-    realPath = path.join(__dirname, '../public/images', imageUrl.replace(/^\/images\//, ''));
-  } else if (imageUrl.startsWith('/uploads/')) {
-    realPath = path.join(__dirname, '../public/uploads', imageUrl.replace(/^\/uploads\//, ''));
-  } else {
-    realPath = path.join(__dirname, '../public', imageUrl.replace(/^\//, ''));
-  }
 
   const apiKey = getApiKey('zhipu') || process.env.ZHIPU_API_KEY;
   if (!apiKey) {
     return { success: false, error: '未配置视觉分析API密钥' };
   }
 
-  const imageBase64 = readImageAsBase64(realPath);
+  // 解析图片 base64（支持本地文件路径和 base64 data URL）
+  let imageBase64: string | null = null;
+  let mime = 'jpeg';
+
+  if (imageUrl.startsWith('data:image/')) {
+    // 直接是 base64 data URL（前端可能直接传 base64）
+    const match = imageUrl.match(/^data:image\/(\w+);base64,(.+)$/);
+    if (match) {
+      mime = match[1] === 'jpg' ? 'jpeg' : match[1];
+      imageBase64 = match[2];
+    }
+  } else if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
+    // 远程 URL → 下载后转 base64
+    try {
+      const resp = await fetch(imageUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+      });
+      if (resp.ok) {
+        const contentType = resp.headers.get('content-type') || '';
+        const extMatch = contentType.match(/image\/(\w+)/);
+        if (extMatch) {
+          mime = extMatch[1] === 'jpg' ? 'jpeg' : extMatch[1];
+        }
+        const buffer = Buffer.from(await resp.arrayBuffer());
+        imageBase64 = buffer.toString('base64');
+      } else {
+        console.warn(`[analyzeImageWithText] Remote image download failed: HTTP ${resp.status} for ${imageUrl.substring(0, 80)}`);
+      }
+    } catch (e) {
+      console.warn('[analyzeImageWithText] Failed to download remote image:', (e as Error).message, 'URL:', imageUrl.substring(0, 80));
+    }
+  } else {
+    // 本地文件路径：/images/xxx 或 /uploads/xxx
+    let realPath = '';
+    if (imageUrl.startsWith('/images/')) {
+      realPath = path.join(__dirname, '../public/images', imageUrl.replace(/^\/images\//, ''));
+    } else if (imageUrl.startsWith('/uploads/')) {
+      realPath = path.join(__dirname, '../public/uploads', imageUrl.replace(/^\/uploads\//, ''));
+    } else {
+      realPath = path.join(__dirname, '../public', imageUrl.replace(/^\//, ''));
+    }
+
+    if (realPath) {
+      const ext = path.extname(realPath).replace('.', '').toLowerCase();
+      const mimeMap: Record<string, string> = { jpg: 'jpeg', jpeg: 'jpeg', png: 'png', webp: 'webp', gif: 'gif' };
+      mime = mimeMap[ext] || 'jpeg';
+      imageBase64 = readImageAsBase64(realPath);
+    }
+  }
+
   if (!imageBase64) {
     return { success: false, error: '无法读取图片文件' };
   }
 
+  // 图片过大时记录警告
+  if (imageBase64.length > 2 * 1024 * 1024) {
+    console.warn(`[analyzeImageWithText] 图片 base64 较大(${(imageBase64.length / 1024 / 1024).toFixed(1)}MB)，可能影响识别速度`);
+  }
+
   try {
-    const ext = path.extname(realPath).replace('.', '').toLowerCase();
-    const mimeMap: Record<string, string> = { jpg: 'jpeg', jpeg: 'jpeg', png: 'png', webp: 'webp', gif: 'gif' };
-    const mime = mimeMap[ext] || 'jpeg';
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
 
     const response = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
       method: 'POST',
+      signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
@@ -762,6 +809,8 @@ export async function analyzeImageWithText(request: {
         max_tokens: 800,
       }),
     });
+
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       return { success: false, error: `Vision API failed (${response.status})` };
@@ -794,6 +843,7 @@ export async function analyzeImageWithText(request: {
       },
     };
   } catch (error) {
+    clearTimeout(timeoutId);
     console.error(`[analyzeImageWithText] Error:`, error);
     return { success: false, error: (error as Error).message };
   }
@@ -940,40 +990,68 @@ async function removeBgWithRemoveBg(imageUrl: string, apiKey: string): Promise<R
 
 async function removeBgWithEraseBg(imageUrl: string): Promise<RemoveBgResponse> {
   try {
-    const response = await fetch('https://api.erase.bg/v1.0/removebg', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        image_url: imageUrl,
-        size: 'auto',
-      }),
-    });
+    // 判断 imageUrl 类型：本地路径 → 读取为 base64；公网 URL → 直接使用
+    let requestBody: any;
+    if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
+      // 公网 URL，直接发送
+      requestBody = { image_url: imageUrl, size: 'auto' };
+    } else if (imageUrl.startsWith('data:image/')) {
+      // base64 data URL，解析为 buffer 后用 form-data 发送
+      const match = imageUrl.match(/^data:image\/\w+;base64,(.+)$/);
+      if (match) {
+        const base64Data = match[1];
+        const imageBuffer = Buffer.from(base64Data, 'base64');
+        const formData = new FormData();
+        formData.append('image_file', new Blob([imageBuffer]), 'image.png');
+        formData.append('size', 'auto');
 
-    console.log(`[RemoveBg] erase.bg Response status: ${response.status}`);
+        const response = await fetch('https://api.erase.bg/v1.0/removebg', {
+          method: 'POST',
+          body: formData as any,
+        });
+        console.log(`[RemoveBg] erase.bg (base64) Response status: ${response.status}`);
 
-    if (!response.ok) {
-      const { data: errorData } = await safeParseJson(response);
-      console.error(`[RemoveBg] erase.bg Failed: HTTP ${response.status} - ${JSON.stringify(errorData)}`);
-      const errorMessage = errorData.errors?.[0]?.title || errorData.message || `erase.bg请求失败: ${response.status}`;
-      return { success: false, error: errorMessage };
+        if (!response.ok) {
+          const { data: errorData } = await safeParseJson(response);
+          return { success: false, error: `免费抠图服务异常: ${errorData?.message || response.status}` };
+        }
+
+        const arrayBuffer = await response.arrayBuffer();
+        const savedUrl = saveImageBuffer(Buffer.from(arrayBuffer));
+        console.log(`[RemoveBg] erase.bg (base64) Success: ${savedUrl}`);
+        return { success: true, imageUrl: savedUrl };
+      }
+      return { success: false, error: '无效的 base64 图片格式' };
+    } else {
+      // 本地文件路径 → 读取为 base64
+      const realPath = resolveImagePath(imageUrl);
+      const imageBase64 = readImageAsBase64(realPath);
+      if (!imageBase64) {
+        return { success: false, error: '无法读取本地图片文件' };
+      }
+      const imageBuffer = Buffer.from(imageBase64, 'base64');
+      const formData = new FormData();
+      formData.append('image_file', new Blob([imageBuffer]), 'image.png');
+      formData.append('size', 'auto');
+
+      const response = await fetch('https://api.erase.bg/v1.0/removebg', {
+        method: 'POST',
+        body: formData as any,
+      });
+      console.log(`[RemoveBg] erase.bg (local file) Response status: ${response.status}`);
+
+      if (!response.ok) {
+        const { data: errorData } = await safeParseJson(response);
+        return { success: false, error: `免费抠图服务异常: ${errorData?.message || response.status}` };
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      const savedUrl = saveImageBuffer(Buffer.from(arrayBuffer));
+      console.log(`[RemoveBg] erase.bg (local file) Success: ${savedUrl}`);
+      return { success: true, imageUrl: savedUrl };
     }
-
-    const contentType = response.headers.get('content-type');
-    if (!contentType || !contentType.startsWith('image/')) {
-      return { success: false, error: 'erase.bg返回非图片响应' };
-    }
-
-    const arrayBuffer = await response.arrayBuffer();
-    const imageBuffer = Buffer.from(arrayBuffer);
-    const savedUrl = saveImageBuffer(imageBuffer);
-
-    console.log(`[RemoveBg] erase.bg Success: ${savedUrl}`);
-
-    return { success: true, imageUrl: savedUrl };
   } catch (error) {
-    console.error(`[RemoveBg] erase.bg Exception: ${error}`);
+    console.error(`[RemoveBg] erase.bg Exception:`, error);
     return { success: false, error: `免费抠图服务调用异常: ${(error as Error).message}` };
   }
 }

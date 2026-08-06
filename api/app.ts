@@ -35,7 +35,6 @@ console.error = (...args: any[]) => {
   if (currentLogLevel <= LOG_LEVELS.error) originalError(...args)
 }
 import { authMiddleware } from './middleware/auth.js'
-import { logApiRequest, logUserAction } from './services/loggerService.js'
 import authRoutes from './routes/auth.js'
 import generateRoutes from './routes/generate.js'
 import historyRoutes from './routes/history.js'
@@ -53,6 +52,7 @@ import chatRoutes from './routes/chat.js'
 import ltxRoutes from './routes/ltx.js'
 import knowledgeRoutes from './routes/knowledge.js'
 import ocrRoutes from './routes/ocr.js'
+import { registerMCPRoutes } from './services/toolRegistry.js'
 import { seedKnowledgeBase } from './services/ragKnowledge.js'
 
 // for esm mode
@@ -70,36 +70,6 @@ app.use(cors({
 }))
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true, limit: '10mb' }))
-
-/** 请求日志中间件：记录所有 API 请求 */
-app.use((req: Request, res: Response, next: NextFunction) => {
-  const start = Date.now();
-  // 只记录 API 路由，跳过静态资源
-  if (req.path.startsWith('/api/')) {
-    const originalJson = res.json.bind(res);
-    res.json = function (body: any) {
-      const duration = Date.now() - start;
-      const result = body?.success === false ? 'failure' : 'success';
-      // 异步写日志，不阻塞响应
-      setImmediate(() => {
-        logApiRequest({
-          method: req.method,
-          path: req.path,
-          userId: (req as any).user?.id,
-          detail: `${req.method} ${req.path} - ${result}`,
-          result,
-          duration,
-          error: body?.error,
-          requestBody: JSON.stringify(req.body)?.substring(0, 300),
-          responseSummary: JSON.stringify(body)?.substring(0, 300),
-        });
-      });
-      return originalJson(body);
-    } as any;
-  }
-  next();
-});
-
 app.use('/images', express.static(path.join(__dirname, 'public/images')))
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')))
 app.use('/videos', express.static(path.join(__dirname, 'public/videos')))
@@ -131,28 +101,10 @@ app.use('/api/ltx', ltxRoutes)
 app.use('/api/knowledge', knowledgeRoutes)
 app.use('/api/ocr', ocrRoutes)
 
-/** 客户端日志上报 */
-app.post('/api/log', (req: Request, res: Response) => {
-  try {
-    const { operation, detail, result, duration, error, metadata } = req.body;
-    if (!operation) {
-      res.status(400).json({ success: false, error: 'operation is required' });
-      return;
-    }
-    logUserAction({
-      userId: (req as any).user?.id,
-      operation,
-      detail: detail || '',
-      result: result || 'success',
-      duration,
-      error,
-      metadata,
-    });
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ success: false, error: (err as Error).message });
-  }
-});
+// MCP 协议 + Tool Registry 路由
+const mcpRouter = express.Router();
+registerMCPRoutes(mcpRouter);
+app.use('/api', mcpRouter);
 
 /**
  * health
