@@ -43,6 +43,7 @@ interface BatchSummary {
   successCount: number;
   failCount: number;
   totalChars: number;
+  progress?: number;
 }
 
 // ==================== 工具函数 ====================
@@ -275,11 +276,21 @@ export default function OcrPage() {
     for (let idx = 0; idx < idleImages.length; idx++) {
       const img = idleImages[idx];
 
+      // 更新进度
+      setBatchSummary({ total: idleImages.length, successCount, failCount: idx - successCount, totalChars, progress: idx + 1 });
+
       try {
+        // 对 base64 图片进行大小检查（过大可能导致 API 超时或拒绝）
+        let imageUrl = img.url;
+        if (imageUrl.startsWith('data:') && imageUrl.length > 2 * 1024 * 1024) {
+          // base64 超过 2MB 时压缩（粗略估算：2MB base64 ≈ 1.5MB 图片）
+          console.warn(`[OCR] 图片 ${img.name} base64 过大(${(imageUrl.length / 1024 / 1024).toFixed(1)}MB)，可能导致识别失败`);
+        }
+
         const response = await fetch('/api/ocr/recognize', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ imageUrl: img.url }),
+          body: JSON.stringify({ imageUrl }),
         });
         const data = await response.json();
 
@@ -304,6 +315,11 @@ export default function OcrPage() {
             ? { ...i, status: 'error', error: '网络请求失败' }
             : i
         ));
+      }
+
+      // 避免 API 限流：每张图片之间延迟 800ms
+      if (idx < idleImages.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 800));
       }
     }
 

@@ -767,9 +767,18 @@ export async function analyzeImageWithText(request: {
     return { success: false, error: '无法读取图片文件' };
   }
 
+  // 图片过大时记录警告
+  if (imageBase64.length > 2 * 1024 * 1024) {
+    console.warn(`[analyzeImageWithText] 图片 base64 较大(${(imageBase64.length / 1024 / 1024).toFixed(1)}MB)，可能影响识别速度`);
+  }
+
   try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
+
     const response = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
       method: 'POST',
+      signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
@@ -800,6 +809,8 @@ export async function analyzeImageWithText(request: {
         max_tokens: 800,
       }),
     });
+
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       return { success: false, error: `Vision API failed (${response.status})` };
@@ -832,6 +843,7 @@ export async function analyzeImageWithText(request: {
       },
     };
   } catch (error) {
+    clearTimeout(timeoutId);
     console.error(`[analyzeImageWithText] Error:`, error);
     return { success: false, error: (error as Error).message };
   }
