@@ -275,6 +275,44 @@ toolRegistry.register({
   estimatedDuration: 1,
 });
 
+// --- 电商法规检查工具 ---
+toolRegistry.register({
+  name: 'check_compliance',
+  description: '检查商品在目标国家的合规性，返回限制、关税、增值税、所需文件等信息。',
+  category: 'knowledge',
+  parameters: [
+    { name: 'productName', type: 'string', description: '商品名称', required: true },
+    { name: 'hsCode', type: 'string', description: '海关编码', required: true },
+    { name: 'countryCode', type: 'string', description: '目标国家代码（如 US, EU, JP）', required: true },
+  ],
+  handler: async (params, ctx) => {
+    const { checkProductCompliance } = await import('./ecommerceService.js');
+    const result = checkProductCompliance({ hsCode: params.hsCode, platforms: [] } as any, params.countryCode);
+    return { success: true, data: result, summary: `${params.countryCode}合规检查: ${result.compliant ? '通过' : '受限'}, 关税${result.estimatedTariff}%` };
+  },
+  estimatedDuration: 1,
+});
+
+// --- 商品图 AI 生成工具 ---
+toolRegistry.register({
+  name: 'generate_product_image',
+  description: '为跨境电商商品生成高质量商品展示图，支持多场景、多角度。',
+  category: 'image',
+  parameters: [
+    { name: 'productName', type: 'string', description: '商品名称', required: true },
+    { name: 'scene', type: 'string', description: '场景', enum: ['white_background', 'lifestyle', 'studio', 'outdoor'], default: 'white_background' },
+    { name: 'style', type: 'string', description: '风格', default: 'realistic' },
+  ],
+  handler: async (params, ctx) => {
+    const prompt = `e-commerce product photo of ${params.productName}, ${params.scene === 'white_background' ? 'pure white background' : params.scene + ' setting'}, professional commercial photography, 8k, high quality`;
+    const { generateImage } = await import('./imageService.js');
+    const result = await generateImage({ prompt, style: params.style || 'realistic', size: '1024x1024' });
+    return { success: result.success, data: result, summary: `商品图生成: ${params.productName}` };
+  },
+  async: true,
+  estimatedDuration: 30,
+});
+
 // ===== MCP 协议路由 =====
 
 /** 注册 MCP 协议端点到 Express Router */

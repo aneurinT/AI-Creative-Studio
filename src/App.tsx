@@ -6,6 +6,7 @@ import VideoGenerator from "@/pages/VideoGenerator";
 import RemoveBg from "@/pages/RemoveBg";
 import ImageComposer from "@/pages/ImageComposer";
 import OcrPage from "@/pages/OcrPage";
+import Ecommerce from "@/pages/Ecommerce";
 import Settings from "@/pages/Settings";
 import Login from "@/pages/Login";
 
@@ -38,6 +39,7 @@ function AppRoutes() {
       <Route path="/video" element={<ProtectedRoute><VideoGenerator /></ProtectedRoute>} />
       <Route path="/remove-bg" element={<ProtectedRoute><RemoveBg /></ProtectedRoute>} />
       <Route path="/ocr" element={<ProtectedRoute><OcrPage /></ProtectedRoute>} />
+      <Route path="/ecommerce" element={<ProtectedRoute><Ecommerce /></ProtectedRoute>} />
       <Route path="/compose" element={<ProtectedRoute><ImageComposer /></ProtectedRoute>} />
       <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
       <Route path="*" element={<Navigate to="/" replace />} />

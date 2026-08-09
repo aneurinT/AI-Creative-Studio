@@ -61,6 +61,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     '/api/agents/orchestrate',
     '/api/agents/execute-plan',
     '/api/collaboration/',
+    '/api/ecommerce/',
   ]
 
   if (publicPaths.some(p => req.path.startsWith(p))) {
