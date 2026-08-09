@@ -52,6 +52,7 @@ import chatRoutes from './routes/chat.js'
 import ltxRoutes from './routes/ltx.js'
 import knowledgeRoutes from './routes/knowledge.js'
 import ocrRoutes from './routes/ocr.js'
+import collaborationRoutes from './routes/collaboration.js'
 import { registerMCPRoutes } from './services/toolRegistry.js'
 import { seedKnowledgeBase } from './services/ragKnowledge.js'
 
@@ -100,6 +101,7 @@ app.use('/api/chat', chatRoutes)
 app.use('/api/ltx', ltxRoutes)
 app.use('/api/knowledge', knowledgeRoutes)
 app.use('/api/ocr', ocrRoutes)
+app.use('/api/collaboration', collaborationRoutes)
 
 // MCP 协议 + Tool Registry 路由
 const mcpRouter = express.Router();

@@ -60,6 +60,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     '/api/tools',
     '/api/agents/orchestrate',
     '/api/agents/execute-plan',
+    '/api/collaboration/',
   ]
 
   if (publicPaths.some(p => req.path.startsWith(p))) {
