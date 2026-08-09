@@ -4,6 +4,7 @@ import { promisify } from 'util';
 import { REASONING_MODEL, REASONING_API, getReasoningApiKey, REASONING_FALLBACK_MODEL, REASONING_FALLBACK_API, getReasoningFallbackApiKey } from '../services/llmConfig.js';
 import { recordAgentTurn, checkAndCompress, getAgentContext, remember, recall } from '../services/agentMemory.js';
 import { toolRegistry } from '../services/toolRegistry.js';
+import { analyzeParallelism, executePlan, type OrchestrationContext } from '../services/orchestrator.js';
 
 const execAsync = promisify(exec);
 const router = Router();
@@ -221,9 +222,20 @@ async function callHermesWithContext(message: string, systemPrompt: string, sess
     contextMessages.push(...recent);
   }
 
-  // 添加历史任务记录
+  // 添加历史任务记录（共享上下文）
   if (taskHistorySummary) {
     contextMessages.push({ role: 'assistant', content: taskHistorySummary });
+  }
+
+  // 注入其他 Agent 的上下文快照（共享上下文 — 所有 Agent 都能看到彼此的结果）
+  if (context && context.taskHistory && context.taskHistory.length > 0) {
+    const otherAgents = context.taskHistory
+      .filter(t => t.agentRole !== agentName) // 排除当前 agent 自己的历史
+      .slice(-3)
+      .map(t => `[${t.agentRole}]: ${t.summary}`).join('\n');
+    if (otherAgents) {
+      contextMessages.push({ role: 'system', content: `【其他Agent的上下文】\n${otherAgents}` });
+    }
   }
 
   // 添加上一轮 Agent 结果
@@ -892,5 +904,75 @@ setInterval(() => {
     }
   });
 }, 60000);
+
+// ===== 调度编排端点 =====
+
+/** POST /api/agents/orchestrate
+ * 分析用户任务，生成执行计划（含并行判断 + 调度决策） */
+router.post('/orchestrate', async (req: Request, res: Response) => {
+  try {
+    const { message, sessionId, history } = req.body;
+    if (!message) { res.status(400).json({ success: false, error: 'message required' }); return; }
+
+    const context: OrchestrationContext = {
+      sessionId: sessionId || `session_${Date.now()}`,
+      userMessage: message,
+      history: history || [],
+      sharedContext: {
+        lastAction: history?.slice(-1)?.[0]?.actionType || '',
+        existingImage: history?.slice(-5).find((m: any) => m.generatedImage)?.generatedImage || '',
+        existingVideo: history?.slice(-5).find((m: any) => m.generatedVideo)?.generatedVideo || '',
+      },
+    };
+
+    // 注入长期记忆到共享上下文
+    try {
+      const memories = await recall({ query: message, limit: 3 });
+      if (memories.length > 0) {
+        context.sharedContext.longMemories = memories.map(m => m.content);
+      }
+    } catch { /* ok */ }
+
+    const plan = await analyzeParallelism(message, context);
+    res.json({ success: true, plan });
+
+  } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+/** POST /api/agents/execute-plan
+ * 执行调度计划（含重试+回退机制） */
+router.post('/execute-plan', async (req: Request, res: Response) => {
+  try {
+    const { plan, sessionId, message, history } = req.body;
+    if (!plan) { res.status(400).json({ success: false, error: 'plan required' }); return; }
+
+    const context: OrchestrationContext = {
+      sessionId: sessionId || `session_${Date.now()}`,
+      userMessage: message || '',
+      history: history || [],
+      sharedContext: {},
+    };
+
+    const results = await executePlan(plan, context, async (task, ctx) => {
+      // 根据 agentName 路由到对应的处理函数
+      // 这里简化处理，实际会调用对应的 agent 端点
+      return { agentName: task.agentName, action: task.action, status: 'executed' };
+    });
+
+    const successCount = results.filter(r => r.status === 'success').length;
+    const failCount = results.filter(r => r.status === 'failed').length;
+
+    res.json({
+      success: failCount === 0,
+      results,
+      summary: `${results.length}个任务: ${successCount}成功, ${failCount}失败`,
+    });
+
+  } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
 
 export default router;

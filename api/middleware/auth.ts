@@ -58,6 +58,8 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     '/api/ocr/',
     '/api/mcp/',
     '/api/tools',
+    '/api/agents/orchestrate',
+    '/api/agents/execute-plan',
   ]
 
   if (publicPaths.some(p => req.path.startsWith(p))) {
