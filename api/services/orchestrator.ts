@@ -1,0 +1,338 @@
+/**
+ * Agent 调度编排器（Orchestrator）
+ *
+ * 核心能力：
+ * 1. 并行判断 — 分析用户任务是否可拆分为并行子任务
+ * 2. 动态调度 — 根据上下文动态选择下一个执行 Agent
+ * 3. 重试+回退 — 失败自动重试（最多3次），全部失败则回退到人工确认
+ * 4. 共享上下文 — 所有 Agent 共享 session 上下文 + 长短记忆
+ * 5. 操作日志 — 每步操作记录到持久化日志
+ */
+import { getChatApiKey, CHAT_API, CHAT_MODEL } from './llmConfig.js';
+import { recall, remember } from './agentMemory.js';
+import { addOperationLog } from './database.js';
+
+// ===== 类型定义 =====
+
+export interface AgentTask {
+  id: string;
+  agentName: string;
+  action: string;
+  params: Record<string, any>;
+  dependencies?: string[];    // 依赖的任务 ID 列表
+  canParallel?: boolean;      // 是否可与其他任务并行
+  retryCount: number;
+  maxRetries: number;
+  status: 'pending' | 'running' | 'success' | 'failed' | 'skipped';
+  result?: any;
+  error?: string;
+  startTime?: number;
+  endTime?: number;
+  retryHistory: Array<{ time: number; error: string }>;
+}
+
+export interface OrchestrationPlan {
+  tasks: AgentTask[];
+  executionMode: 'sequential' | 'parallel' | 'hybrid';
+  reasoning: string;           // 调度决策理由
+  parallelGroups: string[][];  // 并行组：同组内可并行执行
+}
+
+export interface OrchestrationContext {
+  sessionId: string;
+  userMessage: string;
+  history?: any[];
+  imageContext?: any;
+  videoContext?: any;
+  /** 所有 agent 共享的上下文快照 */
+  sharedContext: Record<string, any>;
+}
+
+// ===== 并行判断 — LLM 分析用户任务 =====
+
+const PARALLEL_ANALYSIS_PROMPT = `你是一个任务分析专家。分析用户的请求，判断是否需要多个操作，以及这些操作是否可以并行执行。
+
+## 判断规则
+1. **可并行**：如果任务之间没有依赖关系（如"同时生成一张图片和一段视频"）
+2. **串行**：如果任务有先后依赖（如"先生成图片，再修改它"）
+3. **混合**：部分可并行，部分需串行
+
+## 输出 JSON
+{
+  "tasks": [
+    {"agentName": "storyWriter|videoMaker|imageCreator|hermes", "action": "image|video|modify-image|modify-video|remove-bg|compose|ocr", "params": {"prompt": "..."}, "dependencies": [], "canParallel": true}
+  ],
+  "executionMode": "sequential|parallel|hybrid",
+  "parallelGroups": [["taskId1","taskId2"],["taskId3"]],
+  "reasoning": "分析理由"
+}`;
+
+export async function analyzeParallelism(
+  userMessage: string,
+  context: OrchestrationContext
+): Promise<OrchestrationPlan> {
+  const apiKey = getChatApiKey();
+  if (!apiKey) {
+    // 无 LLM 时：单任务顺序执行
+    return {
+      tasks: [createDefaultTask(userMessage, context)],
+      executionMode: 'sequential',
+      reasoning: '无 LLM 可用，默认串行执行',
+      parallelGroups: [['task-0']],
+    };
+  }
+
+  try {
+    // 注入共享上下文
+    const contextSummary = context.sharedContext?.lastAction
+      ? `当前上下文：上一个操作是 ${context.sharedContext.lastAction}`
+      : '';
+
+    const resp = await fetch(CHAT_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: CHAT_MODEL,
+        messages: [
+          { role: 'system', content: PARALLEL_ANALYSIS_PROMPT },
+          { role: 'user', content: `${contextSummary}\n\n用户请求：${userMessage}` },
+        ],
+        temperature: 0.3,
+        max_tokens: 500,
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+    const data = await resp.json() as any;
+    const content = data.choices?.[0]?.message?.content?.trim();
+    if (!content) throw new Error('空响应');
+
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('JSON解析失败');
+
+    const parsed = JSON.parse(jsonMatch[0]);
+
+    // 构建任务列表
+    const tasks: AgentTask[] = (parsed.tasks || []).map((t: any, i: number) => ({
+      id: `task-${Date.now()}-${i}`,
+      agentName: t.agentName || 'hermes',
+      action: t.action || 'general',
+      params: t.params || {},
+      dependencies: t.dependencies || [],
+      canParallel: t.canParallel !== false,
+      retryCount: 0,
+      maxRetries: 3,
+      status: 'pending' as const,
+      retryHistory: [],
+    }));
+
+    if (tasks.length === 0) {
+      tasks.push(createDefaultTask(userMessage, context));
+    }
+
+    return {
+      tasks,
+      executionMode: parsed.executionMode || 'sequential',
+      reasoning: parsed.reasoning || 'AI 分析完成',
+      parallelGroups: parsed.parallelGroups || [tasks.map(t => t.id)],
+    };
+
+  } catch (err) {
+    console.warn('[Orchestrator] 并行分析失败，使用默认串行:', (err as Error).message);
+    const task = createDefaultTask(userMessage, context);
+    return {
+      tasks: [task],
+      executionMode: 'sequential',
+      reasoning: `分析异常(${(err as Error).message})，默认串行执行`,
+      parallelGroups: [[task.id]],
+    };
+  }
+}
+
+function createDefaultTask(userMessage: string, context: OrchestrationContext): AgentTask {
+  const lower = userMessage.toLowerCase();
+  let action = 'general';
+  let agentName = 'hermes';
+
+  if (lower.includes('视频') || lower.includes('video')) { action = 'video'; agentName = 'videoMaker'; }
+  else if (lower.includes('图片') || lower.includes('图像') || lower.includes('画')) { action = 'image'; agentName = 'imageCreator'; }
+  else if (lower.includes('修改')) { action = lower.includes('视频') ? 'modify-video' : 'modify-image'; agentName = 'videoMaker'; }
+
+  return {
+    id: `task-${Date.now()}-0`,
+    agentName, action,
+    params: { prompt: userMessage },
+    dependencies: [], canParallel: false,
+    retryCount: 0, maxRetries: 3,
+    status: 'pending', retryHistory: [],
+  };
+}
+
+// ===== 重试+回退机制 =====
+
+export interface RetryConfig {
+  maxRetries: number;
+  baseDelay: number;      // 基础延迟（ms）
+  backoffMultiplier: number; // 指数退避倍率
+  retryableErrors: string[]; // 可重试的错误类型
+}
+
+const DEFAULT_RETRY_CONFIG: RetryConfig = {
+  maxRetries: 3,
+  baseDelay: 1000,
+  backoffMultiplier: 2,
+  retryableErrors: ['timeout', 'rate_limit', 'server_error', 'network'],
+};
+
+/** 判断错误是否可重试 */
+export function isRetryable(error: string, config: RetryConfig = DEFAULT_RETRY_CONFIG): boolean {
+  const lower = error.toLowerCase();
+  return config.retryableErrors.some(e => lower.includes(e));
+}
+
+/** 计算重试延迟（指数退避） */
+export function getRetryDelay(retryCount: number, config: RetryConfig = DEFAULT_RETRY_CONFIG): number {
+  return config.baseDelay * Math.pow(config.backoffMultiplier, retryCount);
+}
+
+/** 执行带重试的任务 */
+export async function executeWithRetry(
+  task: AgentTask,
+  executor: (task: AgentTask) => Promise<any>,
+  context: OrchestrationContext,
+  config: RetryConfig = DEFAULT_RETRY_CONFIG
+): Promise<AgentTask> {
+  let lastError = '';
+
+  for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
+    try {
+      task.status = 'running';
+      task.startTime = Date.now();
+      task.retryCount = attempt;
+
+      const result = await executor(task);
+      task.status = 'success';
+      task.result = result;
+      task.endTime = Date.now();
+
+      addOperationLog({
+        level: 'INFO', category: 'agent-orchestration',
+        session_id: context.sessionId,
+        operation: `[${task.agentName}] ${task.action}`,
+        detail: `成功${attempt > 0 ? `(重试${attempt}次后)` : ''} | 耗时${task.endTime - task.startTime!}ms`,
+        duration_ms: task.endTime - task.startTime!,
+        result: 'success',
+      });
+
+      return task;
+
+    } catch (err) {
+      lastError = (err as Error).message;
+      task.retryHistory.push({ time: Date.now(), error: lastError });
+
+      if (attempt < config.maxRetries && isRetryable(lastError, config)) {
+        const delay = getRetryDelay(attempt, config);
+        addOperationLog({
+          level: 'WARN', category: 'agent-orchestration',
+          session_id: context.sessionId,
+          operation: `[${task.agentName}] 重试`,
+          detail: `第${attempt + 1}次重试，等待${delay}ms | 错误: ${lastError.substring(0, 100)}`,
+          result: 'failure', error_text: lastError,
+        });
+        console.warn(`[Orchestrator] ${task.agentName} 失败，${delay}ms后重试(${attempt + 1}/${config.maxRetries}):`, lastError.substring(0, 80));
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+
+      // 不可重试或已达最大次数
+      task.status = 'failed';
+      task.error = lastError;
+      task.endTime = Date.now();
+
+      addOperationLog({
+        level: 'ERROR', category: 'agent-orchestration',
+        session_id: context.sessionId,
+        operation: `[${task.agentName}] 最终失败`,
+        detail: `已重试${attempt}次 | 错误: ${lastError.substring(0, 200)}`,
+        result: 'failure', error_text: lastError,
+      });
+      break;
+    }
+  }
+
+  // 全部失败 → 回退建议
+  task.error = `[回退] ${task.agentName} 任务失败(重试${task.retryCount}次): ${lastError}`;
+  return task;
+}
+
+// ===== 调度引擎 =====
+
+/** 按执行计划调度执行所有任务 */
+export async function executePlan(
+  plan: OrchestrationPlan,
+  context: OrchestrationContext,
+  executor: (task: AgentTask, ctx: OrchestrationContext) => Promise<any>
+): Promise<AgentTask[]> {
+  const completed = new Map<string, AgentTask>();
+  const results: AgentTask[] = [];
+
+  addOperationLog({
+    level: 'INFO', category: 'agent-orchestration',
+    session_id: context.sessionId,
+    operation: '执行计划',
+    detail: `模式: ${plan.executionMode} | ${plan.tasks.length}个任务 | ${plan.reasoning}`,
+    metadata: JSON.stringify({ executionMode: plan.executionMode, taskCount: plan.tasks.length }),
+  });
+
+  // 更新共享上下文
+  context.sharedContext.executionPlan = plan;
+  context.sharedContext.taskCount = plan.tasks.length;
+
+  if (plan.executionMode === 'parallel' || plan.executionMode === 'hybrid') {
+    // 按并行组执行
+    for (const group of plan.parallelGroups) {
+      const groupTasks = group.map(id => plan.tasks.find(t => t.id === id)).filter(Boolean) as AgentTask[];
+
+      if (groupTasks.length > 1) {
+        // 并行组：同时执行
+        console.log(`[Orchestrator] 并行执行 ${groupTasks.length} 个任务:`, groupTasks.map(t => t.agentName));
+        const groupResults = await Promise.allSettled(
+          groupTasks.map(task => executeWithRetry(task, t => executor(t, context), context))
+        );
+        groupResults.forEach((r, i) => {
+          const task = r.status === 'fulfilled' ? r.value : { ...groupTasks[i], status: 'failed' as const, error: r.reason };
+          completed.set(task.id, task);
+          results.push(task);
+          context.sharedContext.lastResult = task.result;
+        });
+      } else {
+        // 单任务串行
+        const task = await executeWithRetry(groupTasks[0], t => executor(t, context), context);
+        completed.set(task.id, task);
+        results.push(task);
+        context.sharedContext.lastResult = task.result;
+      }
+    }
+  } else {
+    // 纯串行
+    for (const task of plan.tasks) {
+      const executed = await executeWithRetry(task, t => executor(t, context), context);
+      completed.set(executed.id, executed);
+      results.push(executed);
+      context.sharedContext.lastResult = executed.result;
+    }
+  }
+
+  // 存储执行摘要到长期记忆
+  const summary = results.map(r => `${r.agentName}:${r.action}=${r.status}`).join(', ');
+  remember({
+    sessionId: context.sessionId, agentName: 'orchestrator',
+    category: 'execution_summary',
+    content: `用户"${context.userMessage.substring(0, 80)}" → 执行: ${summary}`,
+    importance: 0.5,
+  }).catch(() => {});
+
+  return results;
+}
