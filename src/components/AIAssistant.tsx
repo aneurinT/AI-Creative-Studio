@@ -96,7 +96,6 @@ export default function AIAssistant() {
     style: string;
     imageUrl: string;
   } | null>(null);
-  const [useMock, setUseMock] = useState(false);
   const [expandedThoughts, setExpandedThoughts] = useState<Set<string>>(new Set());
   const [showUploader, setShowUploader] = useState(false);
   const [currentSession, setCurrentSession] = useState<ChatSession | null>(null);
@@ -107,6 +106,8 @@ export default function AIAssistant() {
   // 会话列表版本号：每次创建/删除会话时递增，触发 ChatHistory 重新加载
   const [sessionListVersion, setSessionListVersion] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const userScrolledUpRef = useRef(false);
   // 跟踪正在进行的任务（图片/视频生成），用于支持终止操作
   const activeTasksRef = useRef<Map<string, AbortController>>(new Map());
   // 映射 messageId → 后端 taskId，用于取消时通知后端
@@ -125,6 +126,8 @@ export default function AIAssistant() {
   const taskStartTimesRef = useRef<Map<string, number>>(new Map());
   // 防重复超时提醒
   const timeoutNoticeShownRef = useRef(false);
+  // 跟踪已渲染过的消息 ID，用于入场动画只播一次
+  const animatedMessageIdsRef = useRef<Set<string>>(new Set());
   // 消息队列：当前有任务进行时，用户新发送的消息暂存到此队列
   const [messageQueue, setMessageQueue] = useState<Array<{ id: string; text: string; timestamp: number }>>([]);
   // 防止队列重复消费
@@ -476,11 +479,42 @@ export default function AIAssistant() {
     setMessages(defaultMessages);
   }
 
+  /** 智能滚动：仅在用户处于底部或发送新消息时自动滚动 */
   useEffect(() => {
-    if (messagesEndRef.current && messagesEndRef.current.scrollIntoView) {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+
+    // 用户手动上滚后不自动滚动，直到他回到底部
+    if (!isNearBottom) {
+      userScrolledUpRef.current = true;
+      return;
+    }
+
+    userScrolledUpRef.current = false;
+    if (messagesEndRef.current?.scrollIntoView) {
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [messages]);
+
+  /** 监听用户手动滚动，决定是否恢复自动滚动 */
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+      if (isNearBottom) {
+        userScrolledUpRef.current = false;
+      } else {
+        userScrolledUpRef.current = true;
+      }
+    };
+
+    container.addEventListener('scroll', handleScroll, { passive: true });
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, []);
 
   // 自动展开 Agent 思考流程：新消息带有 agentThoughts 或 reasoning 时默认展开
   useEffect(() => {
@@ -502,16 +536,29 @@ export default function AIAssistant() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages]);
 
-  // 自动持久化：messages 变化时防抖保存到后端会话，确保刷新/切换页面不丢失聊天内容
+  // 自动持久化：只在消息内容真正变化时才保存到后端会话
+  // 策略：用消息摘要（id+content+generatedImage+generatedVideo+isGenerating）判断是否变化，
+  // 轮询过程中只更新 progress 不会触发保存
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSavedDigestRef = useRef<string>('');
   useEffect(() => {
     if (!currentSession || messages.length === 0) return;
-    // 跳过初始加载（initSession 设置 messages 时不触发保存）
+    // 生成消息摘要：只对关键字段做 hash，排除 progress 等频繁变化的字段
+    const digest = JSON.stringify(messages.map(m => ({
+      i: m.id,
+      c: m.content,
+      g: m.isGenerating,
+      v: m.generatedVideo,
+      p: m.generatedImage,
+      r: m.reasoning,
+    })));
+    if (digest === lastSavedDigestRef.current) return; // 无实质变化，跳过保存
+    lastSavedDigestRef.current = digest;
+
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
-      // 保存前过滤掉不一致的 pending 状态（防止 isGenerating 残留在已完成的视频上）
       updateSessionMessages(sanitizeMessagesForPersist(messages));
-    }, 800);
+    }, 1500); // 防抖延长到 1.5s，减少高频写入
     return () => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
@@ -703,13 +750,19 @@ export default function AIAssistant() {
   async function callHermesAgent(message: string, history: ChatMessage[], signal?: AbortSignal): Promise<{ action?: string; params?: Record<string, any>; response: string; reasoning?: string; modelUsed?: string }> {
     // 优先使用 SSE 流式模式
     try {
-      const historyJson = encodeURIComponent(JSON.stringify(
-        history.slice(-10).map(m => ({ role: m.role, content: m.content }))
-      ));
-      const url = `/api/hermes/chat/stream?message=${encodeURIComponent(message)}&history=${historyJson}&sessionId=${currentSession?.id || ''}`;
-
-      const sseResponse = await fetch(url, {
-        headers: { ...authHeaders(), 'Accept': 'text/event-stream' },
+      const sseResponse = await fetch('/api/hermes/chat/stream', {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+        body: JSON.stringify({
+          message,
+          history: history.slice(-10).map(m => ({
+            role: m.role,
+            content: m.content,
+            actionType: m.actionType,
+            params: m.params,
+          })),
+          sessionId: currentSession?.id || '',
+        }),
         signal,
       });
 
@@ -823,7 +876,7 @@ export default function AIAssistant() {
         headers: authHeaders(),
         body: JSON.stringify({
           message,
-          history: messages.slice(-10).map(m => ({ role: m.role, content: m.content })),
+          history: messages.slice(-10).map(m => ({ role: m.role, content: m.content, actionType: m.actionType, params: m.params, generatedImage: m.generatedImage, generatedVideo: m.generatedVideo, originalPrompt: m.originalPrompt })),
         }),
         signal: controller.signal,
       });
@@ -854,7 +907,7 @@ export default function AIAssistant() {
           script,
           sessionId,
           originalMessage,
-          history: messages.slice(-10).map(m => ({ role: m.role, content: m.content })),
+          history: messages.slice(-10).map(m => ({ role: m.role, content: m.content, actionType: m.actionType, params: m.params, generatedImage: m.generatedImage, generatedVideo: m.generatedVideo, originalPrompt: m.originalPrompt })),
         }),
         signal: controller.signal,
       });
@@ -882,7 +935,7 @@ export default function AIAssistant() {
         headers: authHeaders(),
         body: JSON.stringify({
           message,
-          history: messages.slice(-10).map(m => ({ role: m.role, content: m.content })),
+          history: messages.slice(-10).map(m => ({ role: m.role, content: m.content, actionType: m.actionType, params: m.params, generatedImage: m.generatedImage, generatedVideo: m.generatedVideo, originalPrompt: m.originalPrompt })),
         }),
         signal: controller.signal,
       });
@@ -922,7 +975,7 @@ export default function AIAssistant() {
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const apiUrl = useMock ? '/api/mock/generate' : '/api/generate';
+        const apiUrl = '/api/generate';
         const response = await fetch(apiUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1068,7 +1121,7 @@ export default function AIAssistant() {
     }]);
 
     try {
-      const apiUrl = useMock ? '/api/mock/generate' : '/api/generate/modify';
+      const apiUrl = '/api/generate/modify';
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: authHeaders(),
@@ -1159,7 +1212,7 @@ export default function AIAssistant() {
     }]);
 
     try {
-      const apiUrl = useMock ? '/api/mock/video' : '/api/video/modify';
+      const apiUrl = '/api/video/modify';
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: authHeaders(),
@@ -1324,12 +1377,12 @@ export default function AIAssistant() {
       }));
     }, 3000);
 
-    const MAX_RETRIES = 2;
-    const RETRY_DELAY_MS = 3000;
+    const MAX_RETRIES = 4; // 增加重试次数，应对 Agnes 限流
+    const RETRY_DELAY_MS = 5000;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const apiUrl = useMock ? '/api/mock/video' : '/api/video';
+        const apiUrl = '/api/video';
         const response = await fetch(apiUrl, {
           method: 'POST',
           headers: authHeaders(),
@@ -1418,7 +1471,7 @@ export default function AIAssistant() {
   }
 
   async function pollVideoStatus(taskId: string, loadingId: string, params: Record<string, any>, controller: AbortController) {
-    const MAX_POLL_RETRIES = 1; // 减少重试次数：Agent 审核失败不应重试，只有网络/暂时错误才重试一次
+    const MAX_POLL_RETRIES = 2; // 网络/临时错误最多重试 2 次
     const RETRY_DELAY_MS = 5000;
     let currentTaskId = taskId;
     const isSplitVideo = taskId.startsWith('split_') || taskId.startsWith('seedance-split-');
@@ -1431,13 +1484,14 @@ export default function AIAssistant() {
         return;
       }
       try {
-        for (let i = 0; i < (isSplitVideo ? 180 : 80); i++) {
+        // 普通任务 100 次（约 8 分钟），拆分任务 240 次（约 20 分钟）
+        for (let i = 0; i < (isSplitVideo ? 240 : 100); i++) {
           if (controller.signal.aborted) {
             activeTasksRef.current.delete(loadingId);
             return;
           }
           // 自适应轮询：前 20 次每 2 秒，之后每 5 秒
-          const pollDelay = useMock ? 1000 : (i < 20 ? 2000 : 5000);
+          const pollDelay = i < 20 ? 2000 : 5000;
           await new Promise(resolve => setTimeout(resolve, pollDelay));
 
           if (controller.signal.aborted) {
@@ -1445,8 +1499,8 @@ export default function AIAssistant() {
             return;
           }
 
-          const statusUrl = useMock ? `/api/mock/video/pending/${currentTaskId}/status` : `/api/video/pending/${currentTaskId}/status`;
-          const response = await fetch(statusUrl, { signal: controller.signal });
+          const statusUrl = `/api/video/pending/${currentTaskId}/status`;
+          const response = await fetch(statusUrl, { signal: controller.signal, headers: authHeaders() });
           const responseText = await response.text();
 
           let data;
@@ -1519,7 +1573,7 @@ export default function AIAssistant() {
 
               // 重新创建任务
               await new Promise(resolve => setTimeout(resolve, 2000));
-              const retryApiUrl = useMock ? '/api/mock/video' : '/api/video';
+              const retryApiUrl = '/api/video';
               const retryResp = await fetch(retryApiUrl, {
                 method: 'POST',
                 headers: authHeaders(),
@@ -1689,7 +1743,7 @@ export default function AIAssistant() {
               }));
               await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
 
-              const retryApiUrl = useMock ? '/api/mock/video' : '/api/video';
+              const retryApiUrl = '/api/video';
               const retryResponse = await fetch(retryApiUrl, {
                 method: 'POST',
                 headers: authHeaders(),
@@ -1796,7 +1850,7 @@ export default function AIAssistant() {
           if (m.id === loadingId) {
             return {
               ...m,
-              content: '⏳ 视频生成时间较长，请稍后在视频历史中查看',
+              content: '⏳ 视频生成耗时较长，后台仍在处理中。完成后可在视频历史中查看，请稍后刷新',
               isGenerating: false,
             };
           }
@@ -2640,21 +2694,13 @@ export default function AIAssistant() {
       <div className="flex-1 flex flex-col h-full bg-gray-50">
         <div className="flex items-center justify-between px-4 py-3 bg-white border-b border-gray-200">
           <div className="flex items-center gap-2">
-            <Sparkles className="w-6 h-6 text-purple-600" />
+            <Sparkles className="w-6 h-6 text-purple-600 animate-pulse-soft" />
             <h1 className="text-lg font-semibold text-gray-800">AI 创意助手</h1>
             {currentSession && (
               <span className="text-xs text-gray-400">- {currentSession.title}</span>
             )}
           </div>
           <div className="flex items-center gap-3">
-            <button
-              onClick={() => setUseMock(!useMock)}
-              className={`px-3 py-1.5 text-sm font-medium rounded-full transition-colors ${
-                useMock ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'
-              }`}
-            >
-              {useMock ? 'Mock 模式' : '真实模式'}
-            </button>
             <button
               onClick={createNewSession}
               className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
@@ -2665,17 +2711,21 @@ export default function AIAssistant() {
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {messages.map(message => (
+        <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
+          {messages.map(message => {
+          const isNew = !animatedMessageIdsRef.current.has(message.id);
+          if (isNew) animatedMessageIdsRef.current.add(message.id);
+          return (
           <div
             key={message.id}
-            className={`flex gap-3 ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
+            className={`flex gap-3 ${message.role === 'user' ? 'justify-end' : 'justify-start'} ${isNew ? 'msg-enter' : ''}`}
+            style={isNew ? { animationDelay: '0ms' } : undefined}
           >
             <div
               className={`max-w-[75%] rounded-2xl px-4 py-3 ${
                 message.role === 'user'
                   ? 'bg-purple-600 text-white rounded-br-md'
-                  : 'bg-white text-gray-800 rounded-bl-md shadow-sm'
+                  : 'bg-white text-gray-800 rounded-bl-md shadow-sm hover-lift'
               }`}
             >
               <div className="flex items-center gap-2 mb-1">
@@ -2690,7 +2740,7 @@ export default function AIAssistant() {
               <p className="text-sm whitespace-pre-wrap">{message.content}</p>
 
               {message.generatedImage && (
-                <div className="mt-3 rounded-lg overflow-hidden border border-gray-200">
+                <div className="mt-3 rounded-lg overflow-hidden border border-gray-200 result-reveal">
                   <img
                     src={message.generatedImage}
                     alt="Generated"
@@ -2810,7 +2860,7 @@ export default function AIAssistant() {
               )}
 
               {message.generatedVideo && (
-                <div className="mt-3 rounded-lg overflow-hidden border border-gray-200">
+                <div className="mt-3 rounded-lg overflow-hidden border border-gray-200 result-reveal">
                   <video
                     src={message.generatedVideo}
                     controls
@@ -2870,7 +2920,7 @@ export default function AIAssistant() {
 
               {/* Agent 思考流程 — 默认展开展示每个 Agent 的思考过程 */}
               {message.agentThoughts && message.agentThoughts.length > 0 && (
-                <div className="mt-3 border border-purple-200 rounded-xl overflow-hidden bg-white">
+                <div className="mt-3 border border-purple-200 rounded-xl overflow-hidden bg-white animate-scale-in">
                   <div className="px-3 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border-b border-purple-100 flex items-center gap-2">
                     <Brain className="w-4 h-4 text-purple-500" />
                     <span className="text-xs font-semibold text-purple-700">AI 思考过程</span>
@@ -2885,7 +2935,11 @@ export default function AIAssistant() {
                       const stepLabel = index === 0 ? '理解需求' : index === message.agentThoughts!.length - 1 ? '输出结果' : '分析处理';
 
                       return (
-                        <div key={index} className="flex gap-2.5">
+                        <div
+                          key={index}
+                          className="flex gap-2.5 thought-step"
+                          style={{ animationDelay: `${index * 80}ms` }}
+                        >
                           {/* 左侧步骤指示器 */}
                           <div className="flex flex-col items-center pt-0.5">
                             <div className={`w-5 h-5 rounded-full ${dotColor} flex items-center justify-center text-white text-[10px] font-bold shadow-sm`}>
@@ -2953,7 +3007,7 @@ export default function AIAssistant() {
                         </div>
                       </div>
                       <div className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap max-h-80 overflow-y-auto font-mono text-xs">
-                        {message.reasoning}
+                        {formatReasoningDisplay(parseReasoningSteps(message.reasoning), message.modelUsed || 'reasoning')}
                       </div>
                     </div>
                   )}
@@ -2961,7 +3015,8 @@ export default function AIAssistant() {
               )}
             </div>
           </div>
-        ))}
+          );
+        })}
         {isTyping && (
           <div className="flex justify-start">
             <div className="bg-white px-4 py-3 rounded-2xl rounded-bl-md shadow-sm">
@@ -3023,7 +3078,7 @@ export default function AIAssistant() {
 
         {/* 多图附件缩略图预览 */}
         {pendingAttachmentImages.length > 0 && (
-          <div className="mb-2 px-2 py-2 bg-purple-50 border border-purple-200 rounded-lg">
+          <div className="mb-2 px-2 py-2 bg-purple-50 border border-purple-200 rounded-lg animate-slide-down">
             <div className="flex items-center gap-2 mb-2">
               <span className="text-xs font-medium text-purple-700">
                 📸 已附加 {pendingAttachmentImages.length} 张图片
@@ -3063,7 +3118,7 @@ export default function AIAssistant() {
 
         {/* 图片 URL 输入区域（粘贴或手动输入链接） */}
         {showImageUrlInput && (
-          <div className="mb-2 px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg">
+          <div className="mb-2 px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg animate-slide-down">
             <div className="flex items-center gap-2">
               <LinkIcon className="w-4 h-4 text-blue-500" />
               <span className="text-xs font-medium text-blue-700">粘贴图片链接</span>
@@ -3106,7 +3161,7 @@ export default function AIAssistant() {
 
         {/* 消息等待队列面板 */}
         {messageQueue.length > 0 && (
-          <div className="mb-3 px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg">
+          <div className="mb-3 px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg animate-slide-down">
             <div className="flex items-center gap-2 mb-2">
               <Layers className="w-4 h-4 text-blue-500" />
               <span className="text-sm font-medium text-blue-700">
@@ -3231,9 +3286,9 @@ export default function AIAssistant() {
           <button
             onClick={handleSend}
             disabled={!input.trim() || isTyping || abortCooldown > 0}
-            className={`p-2.5 rounded-full transition-all ${
+            className={`p-2.5 rounded-full transition-all duration-200 ${
               input.trim() && !isTyping && abortCooldown === 0
-                ? 'bg-purple-600 text-white hover:bg-purple-700'
+                ? 'bg-purple-600 text-white hover:bg-purple-700 hover:scale-105 active:scale-95 animate-glow'
                 : 'bg-gray-200 text-gray-400 cursor-not-allowed'
             }`}
           >
@@ -3255,8 +3310,8 @@ export default function AIAssistant() {
 
       {/* 未完成任务提示模态框 */}
       {showPendingModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 animate-fade-in">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden modal-pop">
             <div className="px-5 py-4 border-b border-gray-200 flex items-center gap-2">
               {pendingModalMode === 'stop' ? (
                 <StopCircle className="w-5 h-5 text-red-500" />
@@ -3291,7 +3346,7 @@ export default function AIAssistant() {
                   {task.actionType === 'video' && task.progress !== undefined && task.progress > 0 && (
                     <div className="w-full bg-gray-200 rounded-full h-1.5">
                       <div
-                        className="bg-purple-500 h-1.5 rounded-full transition-all"
+                        className="progress-flow h-1.5 rounded-full transition-all"
                         style={{ width: `${task.progress}%` }}
                       />
                     </div>

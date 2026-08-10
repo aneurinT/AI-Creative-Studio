@@ -9,7 +9,7 @@ export interface VideoTask {
   duration: string;
   createdAt: string;
   status?: 'pending' | 'completed' | 'failed';
-  source?: string; // 'ai-assistant' | 'video-generator' | 'image-generator'
+  source?: string;
 }
 
 export interface PendingTasksResponse {
@@ -43,23 +43,12 @@ export function getPendingTasks(): PendingTasksResponse {
   try {
     const data = fs.readFileSync(tasksFilePath, 'utf-8');
     const tasks = JSON.parse(data) as VideoTask[];
-    // 只返回 pending 状态的任务
     const pendingOnly = tasks.filter(t => !t.status || t.status === 'pending');
     pendingOnly.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     return { success: true, tasks: pendingOnly };
   } catch (error) {
     console.error('Error reading pending tasks:', error);
     return { success: true, tasks: [] };
-  }
-}
-
-export function getAllTasks(): VideoTask[] {
-  ensureTasksFile();
-  try {
-    const data = fs.readFileSync(tasksFilePath, 'utf-8');
-    return JSON.parse(data) as VideoTask[];
-  } catch {
-    return [];
   }
 }
 
@@ -99,7 +88,12 @@ export function removePendingTask(taskId: string): TaskOperationResponse {
   }
 }
 
-/** 标记任务状态（completed/failed），前端轮询时自动过滤掉 */
+export function getAllTasks(): VideoTask[] {
+  ensureTasksFile();
+  try { const data = fs.readFileSync(tasksFilePath, 'utf-8'); return JSON.parse(data) as VideoTask[]; }
+  catch { return []; }
+}
+
 export function updateTaskStatus(taskId: string, status: 'completed' | 'failed'): TaskOperationResponse {
   ensureTasksFile();
   try {
@@ -115,7 +109,6 @@ export function updateTaskStatus(taskId: string, status: 'completed' | 'failed')
   }
 }
 
-/** 清理所有已完成或失败的任务 */
 export function cleanStaleTasks(): TaskOperationResponse {
   ensureTasksFile();
   try {
@@ -124,9 +117,7 @@ export function cleanStaleTasks(): TaskOperationResponse {
     const active = tasks.filter(t => !t.status || t.status === 'pending');
     fs.writeFileSync(tasksFilePath, JSON.stringify(active, null, 2));
     return { success: true, message: `已清理 ${tasks.length - active.length} 个过期任务` };
-  } catch (error) {
-    return { success: false, message: '清理失败' };
-  }
+  } catch (error) { return { success: false, message: '清理失败' }; }
 }
 
 export function clearAllPendingTasks(): TaskOperationResponse {

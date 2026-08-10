@@ -35,6 +35,7 @@ console.error = (...args: any[]) => {
   if (currentLogLevel <= LOG_LEVELS.error) originalError(...args)
 }
 import { authMiddleware } from './middleware/auth.js'
+import { rateLimitMiddleware, timeoutMiddleware, trackConnection, untrackConnection } from './services/concurrencyService.js'
 import authRoutes from './routes/auth.js'
 import generateRoutes from './routes/generate.js'
 import historyRoutes from './routes/history.js'
@@ -52,8 +53,10 @@ import chatRoutes from './routes/chat.js'
 import ltxRoutes from './routes/ltx.js'
 import knowledgeRoutes from './routes/knowledge.js'
 import ocrRoutes from './routes/ocr.js'
+import collaborationRoutes from './routes/collaboration.js'
 import { registerMCPRoutes } from './services/toolRegistry.js'
 import { seedKnowledgeBase } from './services/ragKnowledge.js'
+import { getConcurrencyStats } from './services/concurrencyService.js'
 
 // for esm mode
 const __filename = fileURLToPath(import.meta.url)
@@ -73,6 +76,15 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }))
 app.use('/images', express.static(path.join(__dirname, 'public/images')))
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')))
 app.use('/videos', express.static(path.join(__dirname, 'public/videos')))
+
+/** 高并发保护中间件 — 限流 + 超时 + 连接追踪 */
+app.use(rateLimitMiddleware);
+app.use(timeoutMiddleware(60000));
+app.use((req: Request, res: Response, next: NextFunction) => {
+  trackConnection();
+  res.on('finish', () => untrackConnection());
+  next();
+});
 
 /**
  * JWT 鉴权中间件
@@ -100,6 +112,7 @@ app.use('/api/chat', chatRoutes)
 app.use('/api/ltx', ltxRoutes)
 app.use('/api/knowledge', knowledgeRoutes)
 app.use('/api/ocr', ocrRoutes)
+app.use('/api/collaboration', collaborationRoutes)
 
 // MCP 协议 + Tool Registry 路由
 const mcpRouter = express.Router();
@@ -115,6 +128,7 @@ app.use(
     res.status(200).json({
       success: true,
       message: 'ok',
+      concurrency: getConcurrencyStats(),
     })
   },
 )

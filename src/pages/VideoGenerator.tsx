@@ -150,7 +150,6 @@ export default function VideoGenerator() {
       const token = localStorage.getItem('auth_token');
       const headers: Record<string, string> = {};
       if (token) headers['Authorization'] = `Bearer ${token}`;
-      // 先清理过期任务
       await fetch('/api/video/pending/clean', { method: 'POST', headers }).catch(() => {});
       const response = await fetch('/api/video/pending', { headers });
       const result = await response.json();
@@ -359,8 +358,6 @@ export default function VideoGenerator() {
             const response = await fetch(apiUrl, { method: 'POST', headers: hdrs, body: JSON.stringify(requestBody) });
             const data = await response.json();
             if (data.success && data.taskId) {
-              setTaskId(data.taskId);
-              setGeneratedVideo({ url: '', taskId: data.taskId, status: 'processing' });
               pollVideoStatus(data.taskId, engine);
             } else { setError(data.error || '分镜头任务创建失败'); setIsGenerating(false); }
             return;
@@ -382,8 +379,6 @@ export default function VideoGenerator() {
         const response = await fetch(apiUrl, { method: 'POST', headers: hdrs2, body: JSON.stringify(requestBody) });
         const data = await response.json();
         if (data.success && data.taskId) {
-          setTaskId(data.taskId);
-          setGeneratedVideo({ url: '', taskId: data.taskId, status: 'processing' });
           pollVideoStatus(data.taskId, engine);
         } else {
           setError(data.error || '分镜头任务创建失败');
@@ -598,7 +593,6 @@ export default function VideoGenerator() {
       const token = localStorage.getItem('auth_token');
       const headers: Record<string, string> = {};
       if (token) headers['Authorization'] = `Bearer ${token}`;
-      // 先标记为失败，再删除
       await fetch(`/api/video/pending/${taskId}/status`, {
         method: 'PUT',
         headers: { ...headers, 'Content-Type': 'application/json' },

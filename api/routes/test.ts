@@ -196,7 +196,7 @@ router.post('/model', async (req: Request, res: Response) => {
 
       case 'agnes': {
         // 测试 Agnes Video API
-        const response = await fetch('https://apihub.agnes-ai.com/v1/videos', {
+        const response = await fetch('https://apihub.agnes-ai.cn/v1/videos', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -238,7 +238,7 @@ router.post('/model', async (req: Request, res: Response) => {
             'Authorization': `Bearer ${apiKey}`,
           },
           body: JSON.stringify({
-            model: 'deepseek-chat',
+            model: 'deepseek-v4-flash',
             messages: [{ role: 'user', content: '你好，请回复"连接成功"' }],
             max_tokens: 10,
           }),

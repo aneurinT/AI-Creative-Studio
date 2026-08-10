@@ -1084,8 +1084,9 @@ export async function generateVideo(request: VideoGenerateRequest): Promise<Vide
 
   console.log(`[Agnes Video] Creating video: prompt="${fullPrompt}", duration="${duration}s", num_frames=${frameConfig.num_frames}, frame_rate=${frameConfig.frame_rate}`);
 
-  const MAX_CREATE_RETRIES = 3;
-  const RETRY_DELAY_MS = 10000;
+  const MAX_CREATE_RETRIES = 5;
+  // Agnes 免费额度限制：每分钟最多 2 次，重试间隔至少 35 秒
+  const RETRY_DELAY_MS = 35000;
 
   let taskData: any;
   let videoId: string | undefined;
@@ -1093,7 +1094,7 @@ export async function generateVideo(request: VideoGenerateRequest): Promise<Vide
   try {
     for (let attempt = 0; attempt <= MAX_CREATE_RETRIES; attempt++) {
       const createResponse = await fetch(
-        'https://apihub.agnes-ai.com/v1/videos',
+        'https://apihub.agnes-ai.cn/v1/videos',
         {
           method: 'POST',
           headers: {
@@ -1154,7 +1155,7 @@ export async function generateVideo(request: VideoGenerateRequest): Promise<Vide
     for (let i = 0; i < 120; i++) {
       await new Promise(resolve => setTimeout(resolve, pollInterval));
 
-      const statusResponse = await fetch(`https://apihub.agnes-ai.com/agnesapi?video_id=${videoId}`, {
+      const statusResponse = await fetch(`https://apihub.agnes-ai.cn/agnesapi?video_id=${videoId}`, {
         headers: { 'Authorization': `Bearer ${apiKey}` },
       });
 
@@ -1256,7 +1257,7 @@ export async function checkVideoTaskStatus(taskId: string, apiKey: string): Prom
   console.log(`[Agnes Video] Checking task status: ${taskId}`);
 
   try {
-    const statusResponse = await fetch(`https://apihub.agnes-ai.com/agnesapi?video_id=${taskId}`, {
+    const statusResponse = await fetch(`https://apihub.agnes-ai.cn/agnesapi?video_id=${taskId}`, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
     });
 
