@@ -1,6 +1,28 @@
 /**
  * local server entry file, for local development
  */
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+// 手动加载 .env 文件（tsx 在某些版本不自动加载）
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const dotenvPath = path.join(__dirname, '..', '.env');
+try {
+  if (fs.existsSync(dotenvPath)) {
+    const content = fs.readFileSync(dotenvPath, 'utf-8');
+    content.split('\n').forEach(line => {
+      const m = line.match(/^\s*([^#\s=]+)\s*=\s*(.+)/);
+      if (m && !process.env[m[1]]) {
+        process.env[m[1]] = m[2].trim();
+      }
+    });
+    console.log('[Server] .env 文件已加载');
+  } else {
+    console.log('[Server] .env 文件未找到，请创建 .env 文件');
+  }
+} catch (e) { /* ok */ }
+
 import app from './app.js';
 import { createServer } from 'http';
 
