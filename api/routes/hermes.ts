@@ -7,10 +7,11 @@ import { reviewUserIntent, findMemoryMatch, recordMemory } from '../services/rev
 import { reviewVideoScript, reviewVideoParams, quickScoreVideoPrompt, reviewVideoFinal, analyzeFailure } from '../services/videoReviewAgent.js';
 import { retrievePromptTemplate, retrieveVisualStyle, buildRAGContext, semanticRAG, seedKnowledgeBase } from '../services/ragKnowledge.js';
 import { setSSEHeaders, sendSSEEvent, sendSSEEnd, sendSSEError, streamLLM } from '../services/sseService.js';
-import { logUserAction, logAgentOperation } from '../services/loggerService.js';
 import { addOperationLog } from '../services/database.js';
 import { recall, remember, recordAgentTurn, checkAndCompress, getAgentContext } from '../services/agentMemory.js';
 import { toolRegistry } from '../services/toolRegistry.js';
+import { smartRoute } from '../services/modelRouter.js';
+import { llmQueue, llmCircuitBreaker } from '../services/concurrencyService.js';
 
 import { CHAT_MODEL, CHAT_API, getChatApiKey, CHAT_FALLBACK_MODEL, CHAT_FALLBACK_API, getChatFallbackApiKey, REASONING_MODEL, REASONING_API, getReasoningApiKey, REASONING_FALLBACK_MODEL, REASONING_FALLBACK_API, getReasoningFallbackApiKey } from '../services/llmConfig.js';
 
@@ -649,8 +650,24 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
       }
     } catch (e) { /* 记忆召回失败不影响主流程 */ }
 
+    // 智能路由：决定使用大模型/小模型/本地知识库
+    const historyLength = (history || []).length;
+    const { decision } = await smartRoute(message, historyLength);
+    console.log(`[Router] ${decision.tier} → ${decision.model} | ${decision.reason}`);
+
+    // 如果智能路由决定直接用本地知识库，跳过 LLM 调用
+    if (decision.tier === 'local' && ragResult.template) {
+      const localAction = ragResult.template.keywords?.[0]?.includes('视频') ? 'video' : 'image';
+      addOperationLog({ level: 'INFO', category: 'agent-operation', session_id: sessionId, operation: '智能路由', detail: `本地知识库直出: ${ragResult.template.description}`, result: 'success', metadata: JSON.stringify({ tier: 'local' }) });
+      res.json({ success: true, response: `根据你的需求，我推荐：${ragResult.template.description}`, action: localAction, params: { prompt: message, ragContext } });
+      return;
+    }
+
     // 优先使用推理模型进行深度意图分析（DeepSeek-R1 / GLM-Z1）
-    const reasoningResult = await callReasoningLLM(message, history || []);
+    const reasoningResult = await llmCircuitBreaker.call(
+      () => callReasoningLLM(message, history || []),
+      () => Promise.resolve(null) // 熔断时回退到 null，触发降级
+    );
     if (reasoningResult) {
       if (ragResult.template) { reasoningResult.params.prompt = (reasoningResult.params.prompt || message) + ' | ' + ragResult.template.prompt.substring(0, 150); }
       if (ragResult.style) { reasoningResult.params.style = ragResult.style.keywords[0] === '动漫' ? 'anime' : reasoningResult.params.style; }
@@ -667,7 +684,10 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
     }
 
     // 推理模型不可用，降级到指令模型（glm-4-flash / deepseek-chat）
-    const llmResult = await callLLM(message, history || []);
+    const llmResult = await llmCircuitBreaker.call(
+      () => callLLM(message, history || []),
+      () => Promise.resolve(null)
+    );
     if (llmResult) {
       if (ragResult.template) { llmResult.params.prompt = (llmResult.params.prompt || message) + ' | ' + ragResult.template.prompt.substring(0, 150); }
       if (ragResult.style) { llmResult.params.style = ragResult.style.keywords[0] === '动漫' ? 'anime' : llmResult.params.style; }
