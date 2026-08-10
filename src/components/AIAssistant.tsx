@@ -107,6 +107,8 @@ export default function AIAssistant() {
   // 会话列表版本号：每次创建/删除会话时递增，触发 ChatHistory 重新加载
   const [sessionListVersion, setSessionListVersion] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const userScrolledUpRef = useRef(false);
   // 跟踪正在进行的任务（图片/视频生成），用于支持终止操作
   const activeTasksRef = useRef<Map<string, AbortController>>(new Map());
   // 映射 messageId → 后端 taskId，用于取消时通知后端
@@ -476,11 +478,42 @@ export default function AIAssistant() {
     setMessages(defaultMessages);
   }
 
+  /** 智能滚动：仅在用户处于底部或发送新消息时自动滚动 */
   useEffect(() => {
-    if (messagesEndRef.current && messagesEndRef.current.scrollIntoView) {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+
+    // 用户手动上滚后不自动滚动，直到他回到底部
+    if (!isNearBottom) {
+      userScrolledUpRef.current = true;
+      return;
+    }
+
+    userScrolledUpRef.current = false;
+    if (messagesEndRef.current?.scrollIntoView) {
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [messages]);
+
+  /** 监听用户手动滚动，决定是否恢复自动滚动 */
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+      if (isNearBottom) {
+        userScrolledUpRef.current = false;
+      } else {
+        userScrolledUpRef.current = true;
+      }
+    };
+
+    container.addEventListener('scroll', handleScroll, { passive: true });
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, []);
 
   // 自动展开 Agent 思考流程：新消息带有 agentThoughts 或 reasoning 时默认展开
   useEffect(() => {
@@ -2671,7 +2704,7 @@ export default function AIAssistant() {
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
           {messages.map(message => (
           <div
             key={message.id}
