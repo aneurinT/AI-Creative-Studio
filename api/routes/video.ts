@@ -192,12 +192,31 @@ router.get('/pending/:taskId/status', async (req: Request, res: Response): Promi
           error: progressInfo.error || '视频生成失败',
         })
       } else {
-        // 仍在处理中，返回进度
-        res.json({
-          success: false,
-          status: 'processing',
-          progress: progressInfo.progress || 0,
-        })
+        // 检查是否已超时（超过15分钟仍在processing视为卡死）
+        const elapsed = Date.now() - (progressInfo.createdAt || progressInfo.updatedAt || 0);
+        if (elapsed > 15 * 60 * 1000) {
+          // 超时自动标记为失败
+          setTaskProgress(taskId, {
+            progress: 0,
+            status: 'failed',
+            error: '视频生成超时（超过15分钟），后台任务可能已中断',
+            taskType: progressInfo.taskType || 'normal',
+          });
+          removePendingTask(taskId);
+          res.json({
+            success: false,
+            status: 'failed',
+            progress: 0,
+            error: '视频生成超时，请重新尝试',
+          });
+        } else {
+          // 仍在处理中，返回进度
+          res.json({
+            success: false,
+            status: 'processing',
+            progress: progressInfo.progress || 0,
+          });
+        }
       }
       return
     }
