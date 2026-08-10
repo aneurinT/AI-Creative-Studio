@@ -354,7 +354,7 @@ export async function semanticRAG(userMessage: string): Promise<{
 
   try {
     const isDeepSeek = apiKey === process.env.DEEPSEEK_API_KEY;
-    const model = isDeepSeek ? 'deepseek-chat' : 'glm-4-flash';
+    const model = isDeepSeek ? 'deepseek-v4-flash' : 'glm-4-flash';
     const url = isDeepSeek
       ? 'https://api.deepseek.com/v1/chat/completions'
       : 'https://open.bigmodel.cn/api/paas/v4/chat/completions';

@@ -29,7 +29,7 @@ async function checkAgnesReachable(): Promise<boolean> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5000);
-    await fetch('https://apihub.agnes-ai.com/v1/videos', {
+    await fetch('https://apihub.agnes-ai.cn/v1/videos', {
       method: 'HEAD',
       signal: controller.signal,
     });
@@ -192,14 +192,20 @@ router.get('/pending/:taskId/status', async (req: Request, res: Response): Promi
           error: progressInfo.error || '视频生成失败',
         })
       } else {
-        // 检查是否已超时（超过15分钟仍在processing视为卡死）
-        const elapsed = Date.now() - (progressInfo.createdAt || progressInfo.updatedAt || 0);
-        if (elapsed > 15 * 60 * 1000) {
+        // 检查是否已超时（普通任务20分钟，拆分任务45分钟）
+        // Agnes 免费额度每分钟 2 次，split 任务需要多段生成+拼接，时间需放宽
+        const isSplitTask = progressInfo.taskType === 'split';
+        const timeoutMs = isSplitTask ? 45 * 60 * 1000 : 20 * 60 * 1000;
+        // 优先用 createdAt，但如果 updatedAt 更晚（比如服务重启后进度被保留），用更晚的时间点
+        // 防止因 createdAt 异常导致误判超时
+        const baseTime = Math.max(progressInfo.createdAt || 0, progressInfo.updatedAt || 0);
+        const elapsed = Date.now() - (baseTime || 0);
+        if (elapsed > timeoutMs) {
           // 超时自动标记为失败
           setTaskProgress(taskId, {
             progress: 0,
             status: 'failed',
-            error: '视频生成超时（超过15分钟），后台任务可能已中断',
+            error: isSplitTask ? '视频拆分生成超时（超过45分钟），请稍后重试' : '视频生成超时（超过20分钟），后台任务可能已中断',
             taskType: progressInfo.taskType || 'normal',
           });
           removePendingTask(taskId);
@@ -207,7 +213,7 @@ router.get('/pending/:taskId/status', async (req: Request, res: Response): Promi
             success: false,
             status: 'failed',
             progress: 0,
-            error: '视频生成超时，请重新尝试',
+            error: isSplitTask ? '视频拆分生成超时（超过45分钟），请稍后重试' : '视频生成超时，请重新尝试',
           });
         } else {
           // 仍在处理中，返回进度
@@ -479,7 +485,7 @@ export async function createVideoTaskAsync(
 
       const createResponse = await Promise.race([
         fetch(
-          'https://apihub.agnes-ai.com/v1/videos',
+          'https://apihub.agnes-ai.cn/v1/videos',
           {
             method: 'POST',
             headers: {
@@ -584,7 +590,7 @@ export async function createVideoTaskAsync(
         const pollInterval = i < 20 ? 2000 : 5000
         await new Promise(r => setTimeout(r, pollInterval))
 
-        const statusResponse = await fetch(`https://apihub.agnes-ai.com/agnesapi?video_id=${videoId}`, {
+        const statusResponse = await fetch(`https://apihub.agnes-ai.cn/agnesapi?video_id=${videoId}`, {
           headers: { 'Authorization': `Bearer ${apiKey}` },
         })
 

@@ -94,7 +94,7 @@ export function routeModel(
     case 'complex':
       return {
         tier: 'large',
-        model: 'deepseek-reasoner',
+        model: 'deepseek-v4-pro',
         reason: `复杂任务(${historyLength}轮上下文)，使用深度推理模型`,
         useLocalFirst: false,
         estimatedTokens: 1000,

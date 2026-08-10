@@ -14,8 +14,9 @@
 // 推理模型（Reasoning Models）— 免费，适合深度思考
 // ============================================================
 
-/** DeepSeek-R1 推理模型（免费，支持 64K 上下文，深度思考） */
-export const REASONING_MODEL = 'deepseek-reasoner';
+/** DeepSeek V4 推理模型（免费，支持 64K 上下文，深度思考）
+ * 2026-07-24 起 deepseek-reasoner 已废弃，迁移至 deepseek-v4-pro */
+export const REASONING_MODEL = 'deepseek-v4-pro';
 export const REASONING_API = 'https://api.deepseek.com/v1/chat/completions';
 export function getReasoningApiKey(): string | undefined {
   return process.env.DEEPSEEK_API_KEY;
@@ -40,7 +41,8 @@ export function getChatApiKey(): string | undefined {
 }
 
 // DeepSeek 备选（当智谱不可用时自动降级）
-export const CHAT_FALLBACK_MODEL = 'deepseek-chat';
+// 2026-07-24 起 deepseek-chat 已废弃，迁移至 deepseek-v4-flash
+export const CHAT_FALLBACK_MODEL = 'deepseek-v4-flash';
 export const CHAT_FALLBACK_API = 'https://api.deepseek.com/v1/chat/completions';
 export function getChatFallbackApiKey(): string | undefined {
   return process.env.DEEPSEEK_API_KEY;

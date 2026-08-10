@@ -453,7 +453,8 @@ export async function generateSplitVideo(
 
           const errorLower = (result.error || '').toLowerCase();
           if (errorLower.includes('rate limit') || errorLower.includes('queue')) {
-            const delay = Math.min(60 + attempt * 30, 180); // 指数退避 60/90/120/150/180s
+            // Agnes 免费额度限制：每分钟最多 2 次，所以间隔至少 35 秒
+            const delay = Math.min(35 + attempt * 15, 90);
             console.log(`[SplitVideo] Scene ${i + 1} rate limited, waiting ${delay}s (attempt ${attempt}/6)`);
             onProgress?.(overallProgress, `限流等待 ${delay}s (${attempt}/6)`);
             await sleep(delay);
