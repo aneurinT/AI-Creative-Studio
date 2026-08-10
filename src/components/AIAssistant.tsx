@@ -96,7 +96,7 @@ export default function AIAssistant() {
     style: string;
     imageUrl: string;
   } | null>(null);
-  const [useMock, setUseMock] = useState(false);
+  const [useMock, setUseMock] = useState(true);
   const [expandedThoughts, setExpandedThoughts] = useState<Set<string>>(new Set());
   const [showUploader, setShowUploader] = useState(false);
   const [currentSession, setCurrentSession] = useState<ChatSession | null>(null);
