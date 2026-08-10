@@ -782,11 +782,12 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
 
 /**
  * SSE 流式聊天端点
- * GET /api/hermes/chat/stream?message=xxx&sessionId=xxx&history=[...]
+ * POST /api/hermes/chat/stream
+ * body: { message, history, sessionId }
  */
-router.get('/chat/stream', async (req: Request, res: Response): Promise<void> => {
+router.post('/chat/stream', async (req: Request, res: Response): Promise<void> => {
   const startTime = Date.now();
-  const message = req.query.message as string;
+  const { message, history, sessionId } = req.body;
   if (!message) {
     res.status(400).json({ success: false, error: 'message is required' });
     return;
@@ -797,13 +798,9 @@ router.get('/chat/stream', async (req: Request, res: Response): Promise<void> =>
   try {
     const systemPrompt = `你是智能 AI 助手，请充分理解用户的每一句话。不要被预设的功能列表限制。你需要完整理解用户需求并自由决定任务类型。输出 JSON：{"action":"任务类型","params":{"具体参数"},"response":"你的分析回应","contextAnalysis":"关联分析"}`;
 
-    const historyStr = (req.query.history as string) || '[]';
-    let history: any[] = [];
-    try { history = JSON.parse(historyStr); } catch {}
-
     const messages: Array<{ role: string; content: string }> = [
       { role: 'system', content: systemPrompt },
-      ...history.slice(-5).map((m: any) => ({ role: m.role, content: m.content?.substring(0, 500) || '' })),
+      ...(history || []).slice(-5).map((m: any) => ({ role: m.role, content: (m.content || '').substring(0, 500) })),
       { role: 'user', content: message },
     ];
 
@@ -821,7 +818,7 @@ router.get('/chat/stream', async (req: Request, res: Response): Promise<void> =>
 
     addOperationLog({
       level: 'INFO', category: 'api-request',
-      session_id: (req.query.sessionId as string) || '',
+      session_id: sessionId || '',
       operation: 'SSE 流式聊天',
       detail: `action=${parsed.action}, ${message?.substring(0, 80)}`,
       duration_ms: Date.now() - startTime,

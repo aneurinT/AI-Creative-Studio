@@ -703,21 +703,19 @@ export default function AIAssistant() {
   async function callHermesAgent(message: string, history: ChatMessage[], signal?: AbortSignal): Promise<{ action?: string; params?: Record<string, any>; response: string; reasoning?: string; modelUsed?: string }> {
     // 优先使用 SSE 流式模式
     try {
-      const historyJson = encodeURIComponent(JSON.stringify(
-        history.slice(-10).map(m => ({
-          role: m.role,
-          content: m.content,
-          actionType: m.actionType,
-          params: m.params,
-          generatedImage: m.generatedImage,
-          generatedVideo: m.generatedVideo,
-          originalPrompt: m.originalPrompt,
-        }))
-      ));
-      const url = `/api/hermes/chat/stream?message=${encodeURIComponent(message)}&history=${historyJson}&sessionId=${currentSession?.id || ''}`;
-
-      const sseResponse = await fetch(url, {
-        headers: { ...authHeaders(), 'Accept': 'text/event-stream' },
+      const sseResponse = await fetch('/api/hermes/chat/stream', {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+        body: JSON.stringify({
+          message,
+          history: history.slice(-10).map(m => ({
+            role: m.role,
+            content: m.content,
+            actionType: m.actionType,
+            params: m.params,
+          })),
+          sessionId: currentSession?.id || '',
+        }),
         signal,
       });
 
