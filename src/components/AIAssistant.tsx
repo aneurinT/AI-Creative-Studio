@@ -704,7 +704,15 @@ export default function AIAssistant() {
     // 优先使用 SSE 流式模式
     try {
       const historyJson = encodeURIComponent(JSON.stringify(
-        history.slice(-10).map(m => ({ role: m.role, content: m.content }))
+        history.slice(-10).map(m => ({
+          role: m.role,
+          content: m.content,
+          actionType: m.actionType,
+          params: m.params,
+          generatedImage: m.generatedImage,
+          generatedVideo: m.generatedVideo,
+          originalPrompt: m.originalPrompt,
+        }))
       ));
       const url = `/api/hermes/chat/stream?message=${encodeURIComponent(message)}&history=${historyJson}&sessionId=${currentSession?.id || ''}`;
 
@@ -823,7 +831,7 @@ export default function AIAssistant() {
         headers: authHeaders(),
         body: JSON.stringify({
           message,
-          history: messages.slice(-10).map(m => ({ role: m.role, content: m.content })),
+          history: messages.slice(-10).map(m => ({ role: m.role, content: m.content, actionType: m.actionType, params: m.params, generatedImage: m.generatedImage, generatedVideo: m.generatedVideo, originalPrompt: m.originalPrompt })),
         }),
         signal: controller.signal,
       });
@@ -854,7 +862,7 @@ export default function AIAssistant() {
           script,
           sessionId,
           originalMessage,
-          history: messages.slice(-10).map(m => ({ role: m.role, content: m.content })),
+          history: messages.slice(-10).map(m => ({ role: m.role, content: m.content, actionType: m.actionType, params: m.params, generatedImage: m.generatedImage, generatedVideo: m.generatedVideo, originalPrompt: m.originalPrompt })),
         }),
         signal: controller.signal,
       });
@@ -882,7 +890,7 @@ export default function AIAssistant() {
         headers: authHeaders(),
         body: JSON.stringify({
           message,
-          history: messages.slice(-10).map(m => ({ role: m.role, content: m.content })),
+          history: messages.slice(-10).map(m => ({ role: m.role, content: m.content, actionType: m.actionType, params: m.params, generatedImage: m.generatedImage, generatedVideo: m.generatedVideo, originalPrompt: m.originalPrompt })),
         }),
         signal: controller.signal,
       });
@@ -2953,7 +2961,7 @@ export default function AIAssistant() {
                         </div>
                       </div>
                       <div className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap max-h-80 overflow-y-auto font-mono text-xs">
-                        {message.reasoning}
+                        {formatReasoningDisplay(parseReasoningSteps(message.reasoning), message.modelUsed || 'reasoning')}
                       </div>
                     </div>
                   )}

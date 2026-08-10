@@ -129,7 +129,12 @@ async function tryCallReasoningLLM(
         model,
         messages: [
           { role: 'system', content: systemPrompt },
-          ...history.slice(-5).map((m: any) => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.content })),
+          ...history.slice(-10).map((m: any) => ({
+            role: m.role === 'user' ? 'user' : 'assistant',
+            content: m.role === 'assistant' && m.actionType
+              ? `${m.content} [任务类型: ${m.actionType}, 参数: ${JSON.stringify(m.params || {}).substring(0, 200)}]`
+              : m.content,
+          })),
           { role: 'user', content: message },
         ],
         temperature: 0.6,
@@ -263,7 +268,12 @@ params: prompt, style, duration, contextFromPrevious(如有)
         model,
         messages: [
           { role: 'system', content: systemPrompt },
-          ...history.slice(-5).map((m: any) => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.content })),
+          ...history.slice(-10).map((m: any) => ({
+            role: m.role === 'user' ? 'user' : 'assistant',
+            content: m.role === 'assistant' && m.actionType
+              ? `${m.content} [任务类型: ${m.actionType}, 参数: ${JSON.stringify(m.params || {}).substring(0, 200)}]`
+              : m.content,
+          })),
           { role: 'user', content: message },
         ],
         temperature: 0.7,

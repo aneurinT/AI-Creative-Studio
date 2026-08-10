@@ -115,10 +115,19 @@ async function callReasoningAgent(message: string, systemPrompt: string, session
   const taskHistorySummary = buildTaskHistorySummary(context);
 
   const contextMessages: any[] = [{ role: 'system', content: systemPrompt }];
+
+  // 上下文融合规则：如果用户之前有多个相关任务，需要智能合并
+  contextMessages.push({
+    role: 'system',
+    content: `【上下文融合规则】如果对话历史中用户连续提出了多个相关的创作请求（如"晴天视频"+"小女孩跳舞"），你需要将它们的核心元素融合成一个统一的输出，而不是只处理最后一个请求。例如：历史中有"晴天场景"和"小女孩跳舞"，当前用户可能希望得到"小女孩在晴天跳舞"的融合结果。`
+  });
+
   if (history && history.length > 0) {
-    const recent = history.slice(-10).map((m: any) => ({
+    const recent = history.slice(-15).map((m: any) => ({
       role: m.role === 'user' ? 'user' : 'assistant' as const,
-      content: typeof m.content === 'string' ? m.content.substring(0, 500) : '',
+      content: m.role === 'assistant' && m.actionType
+        ? `${typeof m.content === 'string' ? m.content.substring(0, 300) : ''} [已执行: ${m.actionType}]`
+        : typeof m.content === 'string' ? m.content.substring(0, 500) : '',
     }));
     contextMessages.push(...recent);
   }
@@ -128,7 +137,7 @@ async function callReasoningAgent(message: string, systemPrompt: string, session
   if (prevResult) {
     contextMessages.push({ role: 'assistant', content: `上一轮处理结果：${prevResult}` });
   }
-  contextMessages.push({ role: 'user', content: `用户需求：${message}\n\n请深度理解这个任务的真正意图，不要被表面文字限制。结合上下文关联分析，自由拆解任务，给出你最专业的分析和输出。` });
+  contextMessages.push({ role: 'user', content: `用户需求：${message}\n\n请深度理解这个任务的真正意图，不要被表面文字限制。如果对话历史中有多个相关的创作请求，请智能融合它们的核心元素。结合上下文关联分析，自由拆解任务，给出你最专业的分析和输出。` });
 
   // 尝试 DeepSeek-R1
   const r1Key = getReasoningApiKey();
