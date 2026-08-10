@@ -1452,7 +1452,7 @@ export default function AIAssistant() {
           }
 
           const statusUrl = useMock ? `/api/mock/video/pending/${currentTaskId}/status` : `/api/video/pending/${currentTaskId}/status`;
-          const response = await fetch(statusUrl, { signal: controller.signal });
+          const response = await fetch(statusUrl, { signal: controller.signal, headers: authHeaders() });
           const responseText = await response.text();
 
           let data;
