@@ -60,6 +60,7 @@ import officeRoutes from './routes/office.js'
 import { registerMCPRoutes } from './services/toolRegistry.js'
 import { seedKnowledgeBase } from './services/ragKnowledge.js'
 import { getConcurrencyStats } from './services/concurrencyService.js'
+import { cleanupExpiredCheckpoints } from './services/checkpointService.js'
 
 // for esm mode
 const __filename = fileURLToPath(import.meta.url)
@@ -142,9 +143,10 @@ app.use(
   },
 )
 
-// 服务启动后异步初始化向量知识库
+// 服务启动后异步初始化向量知识库 & 清理过期检查点
 setTimeout(() => {
   seedKnowledgeBase().catch(err => console.warn('[Startup] 知识库种子导入失败:', err.message));
+  cleanupExpiredCheckpoints();
 }, 3000);
 
 /**

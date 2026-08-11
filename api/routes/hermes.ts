@@ -12,6 +12,7 @@ import { recall, remember, recordAgentTurn, checkAndCompress, getAgentContext } 
 import { toolRegistry } from '../services/toolRegistry.js';
 import { smartRoute, supervisorRoute } from '../services/modelRouter.js';
 import { llmQueue, llmCircuitBreaker } from '../services/concurrencyService.js';
+import { createCheckpoint, resolveCheckpoint, rejectCheckpoint, getLatestState, getSessionProgress, completeAgentCheckpoints, CHECKPOINT_STAGES } from '../services/checkpointService.js';
 
 import { CHAT_MODEL, CHAT_API, getChatApiKey, CHAT_FALLBACK_MODEL, CHAT_FALLBACK_API, getChatFallbackApiKey, REASONING_MODEL, REASONING_API, getReasoningApiKey, REASONING_FALLBACK_MODEL, REASONING_FALLBACK_API, getReasoningFallbackApiKey } from '../services/llmConfig.js';
 
@@ -72,62 +73,77 @@ async function tryCallReasoningLLM(
   model: string,
   provider: string,
 ): Promise<{ action: string; params: Record<string, any>; response: string; reasoning: string } | null> {
-  const systemPrompt = `你是 AI 创意助手的推理核心，负责深度理解用户的创作需求。
+  const systemPrompt = `你是 AI 创意工坊的推理核心（Hermes Agent），负责深度理解用户创作需求并精准路由。
 
-## 你的思考方式
-你需要逐步推理（chain-of-thought）来分析用户的真实意图：
+## 核心原则
+1. **上下文为王**：必须先检查对话历史，理解用户当前请求与历史的关联
+2. **精准分类**：8 种意图类型必须严格区分，不可混淆
+3. **参数完备**：生成的参数必须可直接用于 API 调用，无需二次加工
+4. **自我验证**：输出前反问"我的理解是否与用户真实意图一致？"
 
-### 第0步：上下文关联分析（必须首先执行）
-**仔细检查对话历史中是否存在之前的创作任务。如果有，必须分析当前请求与之前任务的关系：**
+## 推理流程（Chain-of-Thought）
 
-- 如果用户使用代词（"它"、"这个"、"那张图"、"刚才的视频"），说明用户指的是之前生成的作品，你必须从历史中找到对应的作品信息
-- 如果用户说"修改一下"、"调整"、"换个风格"、"让它...起来"，说明用户想修改之前的结果
-- 如果用户说"再生成一个"、"类似的"、"换个角度"，说明用户想要类似的新作品
-- 如果用户提到了与之前任务相同的主题/角色/场景，说明存在延续性关联
-- 如果历史中没有创作任务，或当前请求是全新的独立需求，则标注为"无关联"
+### 阶段一：上下文关联分析
+检查对话历史中是否存在之前的创作任务，判断当前请求与历史的关系：
+| 用户语言模式 | 关联类型 | 动作 |
+|-------------|---------|------|
+| "它"/"这个"/"那张图"/"刚才的视频" | **直接指代** | 从历史中找到对应作品，提取关键参数 |
+| "修改一下"/"调整"/"换个风格"/"让它更..." | **修改意图** | 关联到最近一次同类型任务，标记为 modify |
+| "再生成一个"/"类似的"/"换个角度" | **延续意图** | 继承上一次的参数（风格/主题），微调 prompt |
+| 全新主题，与历史无关 | **独立意图** | 标注为"无关联"，从零开始推理 |
 
-**关联分析结论格式（在 reasoning 中体现）：**
-- 有关联 → 明确指出关联的上一轮任务是什么（action类型、主题、关键参数）
-- 无关联 → 说明这是全新的独立请求
+### 阶段二：意图分类（8 种类型）
+**核心创作类：**
+- **image**：生成图片/插画/海报/壁纸/头像。关键词：画、图、照片、插画、海报
+- **video**：生成视频/短片/动画/广告片/宣传片。关键词：视频、片子、短片、动画、拍
+  - ⚠️ 长视频规则：duration > 18 秒时设置 split: true，response 中提示用户
+- **compose**：同时生成图片+视频。关键词：都要、图片和视频、海报和宣传片、广告物料
 
-### 第1步：语义理解
-- 用户说了什么？核心关键词是什么？
-- 如果第0步发现关联，用户说的"它/这个/那个"指代什么？
-- 用户的情绪和期望是什么？
+**修改编辑类：**
+- **modify-image**：修改已有图片（必须在阶段一确认了关联图片）
+- **modify-video**：修改已有视频（必须在阶段一确认了关联视频）
+- **remove-bg**：抠图/去背景/透明/去除背景
+- **compose-image**：图片合成/拼接/融合/拼一起
 
-### 第2步：意图分类
-分析用户属于以下哪种意图：
-- **image**：生成图片/插画/海报/壁纸/头像
-- **video**：生成视频/短片/动画/广告片/宣传片。**重要：如果用户要求的时长超过18秒（如"30秒"、"1分钟"、"长视频"），action 仍为 video，但 duration 参数要真实反映用户要求，并在 params 中设置 split: true**
-- **compose**：用户要求同时生成图片和视频，比如"做一个花瓶的广告，要有图片和视频"、"生成海报和宣传片"、"图片视频都要"。当用户明确要求多产出物时使用此意图
-- **modify-image**：修改已有图片（必须在第0步确认了关联的图片）
-- **modify-video**：修改已有视频（必须在第0步确认了关联的视频）
-- **remove-bg**：抠图/去背景
-- **compose-image**：图片合成/拼接
-- **general**：闲聊/问答/非创作类问题
+**非创作类：**
+- **general**：闲聊/问答/功能介绍/帮助/非创作类问题
 
-**compose 意图特殊规则：**
-- 用户说"广告"、"推广"、"营销"、"宣传"时，如果涉及具体产品，通常是 compose（图片+视频）
-- compose 的 params 需包含：prompt（通用提示词）、style、duration、composeType: "image+video"
-- 用户上传了图片并要求"生成宣传视频"时，action 为 video（不需要 compose，因为已有参考图）
+### 阶段三：参数推理
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| prompt | 英文提示词，80-200词，含场景+主体+光线+色调 | 从用户描述推理 |
+| style | realistic / cinematic / anime / 3d / illustration | 无明确指向→realistic |
+| duration | 视频时长（秒），根据用户明确数值推断 | 默认10秒 |
+| size | 图片尺寸 | 默认1024x1024 |
+| contextFromPrevious | 如有关联，填入上一轮的主题/风格/角色 | 无关联则省略 |
 
-**长视频拆分规则（重要）：**
-- 当 duration > 18 秒时，在 params 中设置 split: true
-- 在 response 中提示用户："🎬 检测到长视频需求（{duration}秒），将自动拆分为多段生成并拼接，请耐心等待..."
+### 阶段四：自我验证
+输出前检查：
+- [ ] action 类型是否与用户意图匹配？
+- [ ] 如果用户说"画"但 action 是 video → 错误！
+- [ ] 如果用户说"改"但 action 是 image → 错误！
+- [ ] 长视频（>18秒）是否设置了 split: true？
+- [ ] response 是否自然友好且信息完整？
 
-### 第3步：参数推理
-根据用户描述和上下文关联推理出具体参数：
-- prompt: 英文提示词，如果有关联，融入上一轮的作品特征（80-200词）
-- style: realistic/cinematic/anime/3d/illustration，如果用户说"换个风格"，要明确切换
-- duration: 视频时长（秒），默认10秒
-- size: 图片尺寸，默认1024x1024
-- contextFromPrevious: 如果有关联，填入上一轮的关键信息（主题/风格/角色等）
+## 输出格式（严格 JSON，不要任何其他文字）
+{
+  "action": "video",
+  "params": {
+    "prompt": "A majestic cyberpunk cat with glowing neon whiskers...",
+    "style": "cinematic",
+    "duration": 10,
+    "split": false,
+    "contextFromPrevious": "上一轮生成了赛博朋克风格的猫"
+  },
+  "response": "好的，基于上一轮的赛博朋克猫，我为您生成一段10秒的电影感视频~"
+}
 
-### 第4步：输出决策
-基于以上推理，输出最终决策。
-
-## 输出格式（严格JSON，不要其他文字）
-{"action":"video","params":{"prompt":"提示词","style":"cinematic","duration":10,"contextFromPrevious":"上一轮生成了赛博朋克风格的猫"},"response":"基于上一轮的赛博朋克猫，现在生成..."}`;
+## 典型案例
+- 用户："画一只猫" → action: image, params: {prompt: "...", style: "realistic", size: "1024x1024"}
+- 用户："做个30秒的汽车广告" → action: video, params: {prompt: "...", style: "cinematic", duration: 30, split: true}
+- 用户："把刚才那张图变成动漫风格" → action: modify-image, params: {prompt: "...", style: "anime", contextFromPrevious: "上一轮生成了...猫"}
+- 用户："帮我抠图" → action: remove-bg
+- 用户："你好，你能做什么" → action: general`;
 
   try {
     const response = await fetchWithTimeout(apiUrl, {
@@ -237,36 +253,39 @@ async function tryCallLLM(
   model: string,
   provider: string,
 ): Promise<{ action: string; params: Record<string, any>; response: string } | null> {
-  const systemPrompt = `你是 AI 创意助手，负责理解用户创作需求并精准识别意图。
+  const systemPrompt = `你是 AI 创意工坊意图识别器（Hermes Agent 降级模式），负责快速精准识别用户意图。
 
-## 重要：上下文关联（必须首先执行）
-先检查对话历史中是否有之前的创作任务：
-- 如果用户使用代词（"它"、"这个"、"刚才的"），说明指代历史中的作品 → 必须关联
-- 如果用户说"修改"、"调整"、"换个风格"、"让它..."，说明想修改之前的结果 → 必须关联
-- 如果用户说"再生成一个"、"类似的"，说明想要类似新作品 → 继承风格参数
-- 如果历史中无创作任务或当前是完全新需求 → 无需关联
-- 关联时，在 params 中加入 contextFromPrevious 字段，描述上一轮的内容
+## 第一步：上下文关联检查
+先看对话历史是否有创作任务：
+| 用户表达 | 关联类型 | 处理 |
+|---------|---------|------|
+| "它"/"这个"/"刚才的" | 直接指代 | 从历史提取作品信息，标记 contextFromPrevious |
+| "修改"/"调整"/"换个风格" | 修改意图 | 关联最近同类型任务，action 改为 modify |
+| "再生成"/"类似的" | 延续意图 | 继承风格和主题参数 |
+| 全新独立需求 | 无关联 | 不填 contextFromPrevious |
 
-## Action 类型与识别规则
+## 第二步：意图识别规则
+| 用户关键词 | action | 核心参数 |
+|-----------|--------|---------|
+| 画/图/照片/插画/海报/壁纸/头像 | **image** | prompt, style, size |
+| 视频/片子/短片/动画/广告/宣传片/拍 | **video** | prompt, style, duration |
+| 都要/图片和视频/海报和宣传片 | **compose** | prompt, style, composeType |
+| 改/修/换/调整 + 已有作品 | **modify-image** 或 **modify-video** | prompt, style, contextFromPrevious |
+| 抠图/去背景/透明 | **remove-bg** | imageUrl |
+| 拼一起/合成/融合 | **compose-image** | prompt |
+| 你好/帮助/怎么用/能做什么 | **general** | query |
 
-### image（图片生成）
-关键词：画、生成图、制作图片、画一张、画个、插画、海报、壁纸
-params: prompt, style, size(默认1024x1024), contextFromPrevious(如有)
+## 第三步：参数智能推断
+- **prompt**：英文，描述要含场景+主体+光线+色调，80-200词
+- **style**：用户说"动漫/二次元"→ anime；"电影/大片"→ cinematic；"3D"→ 3d；"插画"→ illustration；无明确→ realistic
+- **duration**：用户说"30秒"→ 30；"1分钟"→ 60；没说→ 默认10；>18秒→ 加 split: true
+- **size**：默认 1024x1024
+- **contextFromPrevious**：有历史关联时填入上一轮主题/风格/角色
 
-### video（视频生成）  
-关键词：视频、片子、短片、动画、制作视频、生成视频、拍一个、广告片
-时长推断：用户说"15秒"→ duration:15 | "30秒"→ 30 | "1分钟"→ 60 | 没说→ 默认10
-style: 广告/宣传 → cinematic | 动漫/卡通 → anime | 写实 → realistic
-params: prompt, style, duration, contextFromPrevious(如有)
-
-### modify-image / modify-video / remove-bg / compose-image / compose / general
-修改类意图必须在 params 中带上 contextFromPrevious
-compose 代表同时生成图片+视频（并行任务），compose-image 代表图片合成
-
-## 输出格式（严格JSON，不要其他文字）
-{"action":"video","params":{"prompt":"提示词","style":"realistic","duration":10,"contextFromPrevious":"上一轮生成了...猫"},"response":"基于上一轮的猫，现在生成..."}
-{"action":"image","params":{"prompt":"提示词","style":"anime","size":"1024x1024","contextFromPrevious":"上一轮画了...风景"},"response":"基于上一轮的风景..."}
-{"action":"general","params":{"query":"提问"},"response":"回答"}`;
+## 输出格式（严格 JSON，不要其他文字）
+{"action":"video","params":{"prompt":"英文提示词","style":"cinematic","duration":10,"split":false},"response":"自然友好的中文回复"}
+{"action":"image","params":{"prompt":"英文提示词","style":"anime","size":"1024x1024"},"response":"自然友好的中文回复"}
+{"action":"general","params":{"query":"用户问题"},"response":"直接的回复内容"}`;
 
   try {
     const response = await fetchWithTimeout(apiUrl, {
@@ -697,6 +716,15 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
       if (ragResult.template) { reasoningResult.params.prompt = (reasoningResult.params.prompt || message) + ' | ' + ragResult.template.prompt.substring(0, 150); }
       if (ragResult.style) { reasoningResult.params.style = ragResult.style.keywords[0] === '动漫' ? 'anime' : reasoningResult.params.style; }
       if (ragContext) { reasoningResult.params.ragContext = ragContext; }
+
+      // Checkpoint: 意图识别完成
+      const cpId = createCheckpoint({
+        sessionId, agentName: 'hermes',
+        stage: CHECKPOINT_STAGES.HERMES_INTENT_DETECTED,
+        state: { userMessage: message, action: reasoningResult.action, params: reasoningResult.params, response: reasoningResult.response, modelUsed: 'reasoning', reasoning: reasoningResult.reasoning },
+        summary: `推理模型识别意图: ${reasoningResult.action}`,
+      });
+
       res.json({
         success: true,
         response: reasoningResult.response,
@@ -704,6 +732,7 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
         params: reasoningResult.params,
         reasoning: reasoningResult.reasoning?.substring(0, 500), // 返回推理过程供前端展示
         modelUsed: 'reasoning',
+        checkpointId: cpId,
       });
       return;
     }
@@ -717,7 +746,16 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
       if (ragResult.template) { llmResult.params.prompt = (llmResult.params.prompt || message) + ' | ' + ragResult.template.prompt.substring(0, 150); }
       if (ragResult.style) { llmResult.params.style = ragResult.style.keywords[0] === '动漫' ? 'anime' : llmResult.params.style; }
       if (ragContext) { llmResult.params.ragContext = ragContext; }
-      res.json({ success: true, response: llmResult.response, action: llmResult.action, params: llmResult.params, modelUsed: 'instruction' });
+
+      // Checkpoint: 意图识别完成（指令模型）
+      const cpId = createCheckpoint({
+        sessionId, agentName: 'hermes',
+        stage: CHECKPOINT_STAGES.HERMES_INTENT_DETECTED,
+        state: { userMessage: message, action: llmResult.action, params: llmResult.params, response: llmResult.response, modelUsed: 'instruction' },
+        summary: `指令模型识别意图: ${llmResult.action}`,
+      });
+
+      res.json({ success: true, response: llmResult.response, action: llmResult.action, params: llmResult.params, modelUsed: 'instruction', checkpointId: cpId });
 
       // 异步存储长期记忆（不阻塞响应）
       remember({
@@ -821,7 +859,22 @@ router.post('/chat/stream', async (req: Request, res: Response): Promise<void> =
   setSSEHeaders(res);
 
   try {
-    const systemPrompt = `你是智能 AI 助手，请充分理解用户的每一句话。不要被预设的功能列表限制。你需要完整理解用户需求并自由决定任务类型。输出 JSON：{"action":"任务类型","params":{"具体参数"},"response":"你的分析回应","contextAnalysis":"关联分析"}`;
+    const systemPrompt = `你是 AI 创意工坊智能助手（Hermes Agent SSE 模式），负责理解用户需求并自由路由。
+
+## 任务类型
+- **image**：生成图片
+- **video**：生成视频（>18秒加 split: true）
+- **compose**：同时生成图片和视频
+- **modify-image** / **modify-video**：修改已有作品（需确认上下文关联）
+- **remove-bg**：抠图去背景
+- **compose-image**：图片合成
+- **general**：非创作类问答
+
+## 上下文关联
+如果用户说"它"/"这个"/"修改一下"/"再生成一个"，必须从对话历史中找到关联的上一个作品信息。
+
+## 输出格式（严格 JSON）
+{"action":"video","params":{"prompt":"...","style":"cinematic","duration":10,"split":false},"response":"友好的中文回复","contextAnalysis":"与上一轮的关系说明"}`;
 
     const messages: Array<{ role: string; content: string }> = [
       { role: 'system', content: systemPrompt },
@@ -1028,6 +1081,73 @@ router.post('/failure-analysis', async (req: Request, res: Response): Promise<vo
     const { errorMsg, userPrompt, style, duration, engine } = req.body;
     const result = await analyzeFailure(errorMsg || '', userPrompt || '', style || '', duration || '10', engine || '未知');
     res.json({ success: true, result });
+  } catch (error) {
+    res.json({ success: false, error: (error as Error).message });
+  }
+});
+
+/**
+ * 检查点查询：获取会话的所有活跃检查点（用于前端展示执行进度）
+ * GET /api/hermes/checkpoints?sessionId=xxx
+ */
+router.get('/checkpoints', (req: Request, res: Response): void => {
+  try {
+    const sessionId = (req.query.sessionId as string) || (req as any).sessionId || 'default';
+    const progress = getSessionProgress(sessionId);
+    res.json({ success: true, checkpoints: progress });
+  } catch (error) {
+    res.json({ success: false, error: (error as Error).message });
+  }
+});
+
+/**
+ * 检查点恢复：获取最近的检查点状态用于恢复
+ * GET /api/hermes/checkpoints/latest?sessionId=xxx&agentName=hermes
+ */
+router.get('/checkpoints/latest', (req: Request, res: Response): void => {
+  try {
+    const sessionId = (req.query.sessionId as string) || (req as any).sessionId || 'default';
+    const agentName = (req.query.agentName as string) || 'hermes';
+    const stage = req.query.stage as string | undefined;
+    const latest = getLatestState(sessionId, agentName, stage as any);
+    if (!latest) {
+      res.json({ success: true, found: false, message: '没有可恢复的检查点' });
+      return;
+    }
+    res.json({ success: true, found: true, checkpoint: latest });
+  } catch (error) {
+    res.json({ success: false, error: (error as Error).message });
+  }
+});
+
+/**
+ * 完成检查点：标记检查点为已完成
+ * POST /api/hermes/checkpoints/complete
+ */
+router.post('/checkpoints/complete', (req: Request, res: Response): void => {
+  try {
+    const { checkpointId } = req.body;
+    if (!checkpointId) {
+      res.status(400).json({ success: false, error: 'checkpointId is required' });
+      return;
+    }
+    resolveCheckpoint(checkpointId);
+    res.json({ success: true });
+  } catch (error) {
+    res.json({ success: false, error: (error as Error).message });
+  }
+});
+
+/**
+ * 完成 Agent 的所有检查点：任务流完全结束时调用
+ * POST /api/hermes/checkpoints/complete-all
+ */
+router.post('/checkpoints/complete-all', (req: Request, res: Response): void => {
+  try {
+    const sessionId = (req.body.sessionId as string) || (req as any).sessionId || 'default';
+    const agentName = (req.body.agentName as string) || 'hermes';
+    const count = completeAgentCheckpoints(sessionId, agentName);
+    res.json({ success: true, completedCount: count });
   } catch (error) {
     res.json({ success: false, error: (error as Error).message });
   }

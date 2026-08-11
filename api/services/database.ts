@@ -49,18 +49,21 @@ export interface ChatMessageRow { id: string; session_id: string; role: string; 
 export interface ShortMemoryRow { id: string; session_id: string; agent_name: string; turn_index: number; role: string; content: string; summary: string; token_estimate: number; created_at: string; }
 export interface LongMemoryRow { id: string; session_id: string; agent_name: string; category: string; content: string; embedding_json: string; importance: number; access_count: number; created_at: string; last_accessed: string; }
 export interface VideoTaskRow { task_id: string; prompt: string; style: string; duration: string; status: string; source: string; user_id: string; created_at: string; updated_at: string; }
+export interface CheckpointRow { id: string; session_id: string; agent_name: string; stage: string; state_json: string; summary: string; status: 'active' | 'completed' | 'failed' | 'expired'; created_at: string; updated_at: string; }
 
 let _sessions: JsonTable<ChatSession> | null = null;
 let _messages: JsonTable<ChatMessageRow> | null = null;
 let _shortMemory: JsonTable<ShortMemoryRow> | null = null;
 let _longMemory: JsonTable<LongMemoryRow> | null = null;
 let _videoTasks: JsonTable<VideoTaskRow> | null = null;
+let _checkpoints: JsonTable<CheckpointRow> | null = null;
 
 const sessions = () => { if (!_sessions) _sessions = new JsonTable<ChatSession>('chat_sessions.json'); return _sessions; };
 const messages = () => { if (!_messages) _messages = new JsonTable<ChatMessageRow>('chat_messages.json'); return _messages; };
 const shortMemory = () => { if (!_shortMemory) _shortMemory = new JsonTable<ShortMemoryRow>('agent_short_memory.json'); return _shortMemory; };
 const longMemory = () => { if (!_longMemory) _longMemory = new JsonTable<LongMemoryRow>('agent_long_memory.json'); return _longMemory; };
 const videoTasks = () => { if (!_videoTasks) { _videoTasks = new JsonTable<VideoTaskRow>('video_tasks.json'); migrateOldVideoTasks(); } return _videoTasks; };
+const checkpoints = () => { if (!_checkpoints) _checkpoints = new JsonTable<CheckpointRow>('checkpoints.json'); return _checkpoints; };
 
 function migrateOldVideoTasks(): void {
   const oldPath = path.join(DATA_DIR, 'videoTasks.json');
@@ -97,12 +100,44 @@ export function updateVideoTaskStatus(taskId: string, status: string): void { co
 export function getPendingVideoTasks() { return videoTasks().query({ where: t => t.status === 'pending', orderBy: 'created_at', desc: true }); }
 export function cleanCompletedVideoTasks() { return videoTasks().deleteWhere(t => ['completed', 'failed', 'cancelled'].includes(t.status)); }
 
+// ===== Checkpoint 检查点 =====
+export function saveCheckpoint(cp: Omit<CheckpointRow, 'id' | 'created_at' | 'updated_at'>): string {
+  const id = `cp_${cp.session_id}_${cp.agent_name}_${cp.stage}_${Date.now()}`;
+  const now = new Date().toISOString();
+  checkpoints().upsert({ ...cp, id, created_at: now, updated_at: now });
+  return id;
+}
+export function getCheckpoint(id: string): CheckpointRow | undefined { return checkpoints().get(id); }
+export function getActiveCheckpoints(sessionId: string, agentName?: string): CheckpointRow[] {
+  return checkpoints().query({
+    where: c => c.session_id === sessionId && c.status === 'active' && (!agentName || c.agent_name === agentName),
+    orderBy: 'created_at', desc: true,
+  });
+}
+export function getLatestCheckpoint(sessionId: string, agentName: string, stage?: string): CheckpointRow | undefined {
+  const all = checkpoints().query({
+    where: c => c.session_id === sessionId && c.agent_name === agentName && c.status === 'active' && (!stage || c.stage === stage),
+    orderBy: 'created_at', desc: true, limit: 1,
+  });
+  return all[0];
+}
+export function updateCheckpointStatus(id: string, status: CheckpointRow['status']): void {
+  const cp = checkpoints().get(id);
+  if (cp) { cp.status = status; cp.updated_at = new Date().toISOString(); checkpoints().upsert(cp); }
+}
+export function completeCheckpoint(id: string): void { updateCheckpointStatus(id, 'completed'); }
+export function failCheckpoint(id: string): void { updateCheckpointStatus(id, 'failed'); }
+export function expireOldCheckpoints(maxAgeHours = 24): number {
+  const cutoff = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000).toISOString();
+  return checkpoints().deleteWhere(c => c.status === 'active' && c.created_at < cutoff);
+}
+
 // 操作日志（追加模式，按日分文件）
 let _logStream: { stream: fs.WriteStream; date: string } | null = null;
 function getLogStream(): fs.WriteStream { const today = new Date().toISOString().slice(0, 10); if (_logStream && _logStream.date === today) return _logStream.stream; if (_logStream) _logStream.stream.end(); const logPath = path.join(DATA_DIR, 'logs', `operations-${today}.log`); const logDir = path.dirname(logPath); if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true }); _logStream = { stream: fs.createWriteStream(logPath, { flags: 'a' }), date: today }; return _logStream.stream; }
 export function addOperationLog(log: { timestamp?: string; level: string; category: string; user_id?: string; session_id?: string; operation: string; detail?: string; duration_ms?: number; result?: string; error_text?: string; metadata?: string }): void { const line = JSON.stringify({ ...log, timestamp: log.timestamp || new Date().toISOString(), user_id: log.user_id || 'anonymous', session_id: log.session_id || '', detail: log.detail || '', duration_ms: log.duration_ms || 0, result: log.result || 'success', error_text: log.error_text || '', metadata: log.metadata || '{}' }) + '\n'; try { getLogStream().write(line); } catch { /* silent */ } }
 
-export function flushAll(): void { sessions().flush(); messages().flush(); shortMemory().flush(); longMemory().flush(); videoTasks().flush(); if (_logStream) { _logStream.stream.end(); _logStream = null; } }
+export function flushAll(): void { sessions().flush(); messages().flush(); shortMemory().flush(); longMemory().flush(); videoTasks().flush(); checkpoints().flush(); if (_logStream) { _logStream.stream.end(); _logStream = null; } }
 export function closeDb(): void { flushAll(); console.log('[DB] 所有表已保存并关闭'); }
 
 process.on('exit', () => flushAll());

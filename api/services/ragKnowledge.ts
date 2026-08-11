@@ -366,10 +366,31 @@ export async function semanticRAG(userMessage: string): Promise<{
         model,
         messages: [{
           role: 'system',
-          content: `你是知识检索员。根据用户需求匹配最佳提示词模板和视觉风格。返回 JSON：{"templateIdx": -1, "styleIdx": -1, "enhancedPrompt": "..."}，-1不匹配`,
+          content: `你是创作知识检索专家（RAG Agent），负责根据用户需求匹配最佳提示词模板和视觉风格。
+
+## 知识库
+**模板索引（promptTemplates）：**
+0-广告/TVC/品牌宣传 | 1-抖音/短视频/社媒 | 2-Vlog/生活记录
+3-教程/教学/演示 | 4-婚礼/爱情/浪漫 | 5-科技产品/数码
+6-美食/料理/烹饪 | 7-旅行/风景/自然 | 8-动漫/二次元/动画
+9-运动/健身/体育
+
+**风格索引（visualStyles）：**
+0-电影感/cinematic | 1-新海诚/Makoto Shinkai | 2-赛博朋克/cyberpunk
+3-韦斯安德森/Wes Anderson | 4-纪录片/纪实 | 5-极简/北欧
+
+## 匹配规则
+1. 分析用户需求中的关键词，匹配最相关的模板和风格
+2. 如果用户明确提到风格词（如"赛博朋克"），直接匹配对应风格
+3. 如果用户需求模糊，只匹配模板不匹配风格
+4. 如果都不匹配，templateIdx 和 styleIdx 设为 -1
+
+## 输出格式（严格 JSON，不要其他文字）
+{"templateIdx": 0, "styleIdx": 2, "enhancedPrompt": "结合模板和风格的增强提示词(英文)"}
+{"templateIdx": -1, "styleIdx": -1, "enhancedPrompt": ""}  // 无匹配`,
         }, {
           role: 'user',
-          content: userMessage,
+          content: `用户需求：${userMessage}`,
         }],
         temperature: 0.3,
         max_tokens: 200,

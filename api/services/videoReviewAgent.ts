@@ -27,19 +27,19 @@ export async function reviewVideoScript(
 ): Promise<VideoReviewResult> {
   // 优先使用推理模型
   const reasoningResult = await reviewWithReasoningModel(
-    `你是视频脚本审核员，拥有丰富的影视制作经验。请逐步推理分析脚本质量。
+    `你是视频脚本审核员（Video Review Agent），拥有丰富的影视制作经验。请逐步推理分析脚本质量。
 
 ## 推理步骤
-1. **相关性分析**：脚本是否紧扣用户需求？有无偏离？
-2. **可生成性分析**：脚本描述是否足够视觉化？
-3. **完整度分析**：是否包含场景、角色、动作、运镜、光线/色调？
+1. **相关性分析**：脚本是否紧扣用户需求？有无偏离主题？
+2. **可生成性分析**：脚本描述是否足够视觉化？能否转化为视频画面？
+3. **完整度分析**：是否包含场景、角色、动作、运镜、光线/色调五大要素？
 4. **时长匹配**：场景总时长是否匹配 ${duration} 秒？
 5. **安全性分析**：是否包含暴力、色情、政治敏感内容？
 
 ## 输出JSON
-{"passed":true,"level":"ok","message":"脚本质量良好","suggestions":[]}
-{"passed":false,"level":"warning","message":"存在问题","suggestions":["建议1","建议2"]}
-{"passed":false,"level":"error","message":"严重问题","suggestions":["必须修正的问题"]}`,
+{"passed":true,"level":"ok","message":"脚本质量良好，五大要素齐全","suggestions":[]}
+{"passed":false,"level":"warning","message":"脚本缺少光线描述","suggestions":["补充 golden hour 或 soft lighting 等光线描述"]}
+{"passed":false,"level":"error","message":"脚本包含不适宜内容","suggestions":["移除...","替换为..."]}`,
     `用户需求: ${userPrompt}\n\n脚本内容: ${script.substring(0, 1000)}`,
     '脚本审核',
   );
@@ -66,7 +66,7 @@ export async function reviewVideoScript(
         messages: [
           {
             role: 'system',
-            content: `你是视频脚本审核员，拥有丰富的影视制作经验。请逐项检查：
+            content: `你是视频脚本审核员（Video Review Agent），拥有丰富的影视制作经验。请逐项检查：
 
 ## 检查清单
 1. **相关性**：脚本是否紧扣用户需求？有否偏离主题？（例如用户要宣传片但写成了Vlog）
@@ -77,13 +77,14 @@ export async function reviewVideoScript(
 6. **品牌合规**：是否有侵权风险（使用其他品牌元素）？
 
 ## 判定规则
-- passed: 全部通过
-- warning: 存在小问题但不影响生成
-- error: 存在严重问题，必须修正
+- passed / ok: 全部通过，五大要素齐全
+- warning: 存在小问题但不影响生成，给出建议
+- error: 存在严重问题（内容安全/严重偏离主题），必须修正
 
 ## 输出JSON
 {"passed":true,"level":"ok","message":"脚本质量良好，可以开始生成","suggestions":[]}
-{"passed":false,"level":"error","message":"脚本缺少视觉描述，无法生成","suggestions":["添加具体场景描写","补充光线和色调"]}`,
+{"passed":false,"level":"warning","message":"缺少光线和色调描述","suggestions":["添加golden hour lighting, warm tones"]}
+{"passed":false,"level":"error","message":"脚本包含不适宜内容，无法生成","suggestions":["移除违规内容"]}`,
           },
           {
             role: 'user',
@@ -132,17 +133,17 @@ export async function reviewVideoParams(
 ): Promise<VideoReviewResult> {
   // 优先使用推理模型
   const reasoningResult = await reviewWithReasoningModel(
-    `你是视频参数审核员。请逐步推理分析参数质量：
+    `你是视频参数审核员（Video Review Agent）。请逐步推理分析参数质量：
 
 ## 推理步骤
-1. **prompt 质量**：是否英文？是否包含视觉元素（场景+主体+光线+运镜）？长度是否50-300词？
-2. **style 匹配**：风格是否匹配用户描述？
-3. **duration 合理**：时长是否在 API 支持范围（5-90秒）？
-4. **参数完整**：prompt, style, duration 三个必须都有
+1. **prompt 质量**：是否英文？是否包含视觉四要素（场景+主体+光线+运镜）？长度是否50-300词？
+2. **style 匹配**：风格是否匹配用户描述？（用户说"电影大片"但 style=illustration → 错误）
+3. **duration 合理**：时长是否在 API 支持范围（5-90秒）？是否匹配用户要求？
+4. **参数完整**：prompt, style, duration 三个必须都有，缺一不可
 
 ## 输出JSON
-{"passed":true,"level":"ok","message":"参数配置正确"}
-{"passed":false,"level":"warning","message":"存在问题","suggestions":["建议"]}`,
+{"passed":true,"level":"ok","message":"参数配置正确，prompt质量高，风格匹配"}
+{"passed":false,"level":"warning","message":"prompt 过短(仅20词)，缺少视觉细节","suggestions":["补充场景描述、光线和运镜信息，扩展到80-200词"]}`,
     `用户需求: ${userPrompt}\n\n生成参数: ${JSON.stringify(params)}`,
     '参数审核',
   );

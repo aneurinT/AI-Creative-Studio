@@ -578,8 +578,30 @@ export async function modifyImage(request: ModifyImageRequest): Promise<Generate
   console.log(`[ModifyImage] Original: ${originalPrompt.substring(0, 50)}...`);
   console.log(`[ModifyImage] Modify: ${modifyInstruction}`);
 
-  const systemPrompt = '你是一位专业的图片修改助手。根据用户的原始描述和修改需求，生成新的图片描述。要求：1. 保留原始描述的核心内容；2. 根据修改需求调整相应的部分；3. 生成的描述要完整、详细、自然；4. 只返回新的图片描述，不要加引号或其他修饰。';
-  const userPrompt = `原始图片描述：${originalPrompt}\n修改需求：${modifyInstruction}\n请生成新的图片描述。`;
+  const systemPrompt = `你是图片修改专家（Image Modifier Agent），负责根据用户修改需求，融合原始图片描述生成新的完整描述。
+
+## 修改规则
+1. **保留主体**：原始描述中的核心元素（主题、场景、构图）保持不变
+2. **精准修改**：只修改用户明确要求的部分，不要过度发挥
+3. **风格转换**：如果用户要求"动漫化"/"3D化"/"写实化"，需完整替换风格描述词
+4. **元素增减**：用户要求"加"/"去掉"某元素时，精确增删，不波及其他
+
+## 修改类型与处理
+| 修改类型 | 用户关键词 | 处理方式 |
+|---------|-----------|---------|
+| 风格转换 | 动漫/3D/写实/油画/水彩 | 替换风格词，保留主体描述 |
+| 颜色调整 | 红色/蓝色/暖色调/冷色调 | 修改颜色描述词 |
+| 元素增减 | 加/去掉/删除/换成 | 精确增删该元素 |
+| 背景替换 | 背景/场景/环境 | 替换背景描述，保留主体 |
+| 画幅调整 | 竖版/横版/方形 | 调整尺寸参数 |
+
+## 输出要求
+- 只返回新的图片描述，不要引号或修饰
+- 描述长度：80-200词，英文
+- 包含：场景 + 主体 + 光线 + 色调 + 构图
+- 如果用户修改需求模糊，基于原始描述合理推断`;
+
+  const userPrompt = `原始图片描述：${originalPrompt}\n修改需求：${modifyInstruction}\n\n请生成新的图片描述。`;
 
   let newPrompt = '';
   const apiKey = getApiKey('zhipu') || process.env.ZHIPU_API_KEY;
@@ -666,7 +688,19 @@ export async function analyzeImage(request: ImageAnalysisRequest): Promise<Image
               { type: 'image_url', image_url: { url: `data:image/${mime};base64,${imageBase64}` } },
               {
                 type: 'text',
-                text: '请详细描述这张图片的内容，包括：1. 画面主体是什么；2. 背景环境；3. 色彩和光线；4. 整体氛围风格。限制在80-150字之间，只返回描述文字。',
+                text: `你是图片分析专家（Image Analyst），请详细描述这张图片。
+
+## 分析维度
+1. **主体识别**：画面的核心物体/人物是什么？位置在哪里？
+2. **背景环境**：室内/室外？自然/城市？具体场景特征？
+3. **色彩与光线**：主色调？光源方向？明暗对比？
+4. **构图与视角**：透视关系？画幅比例？景深？
+5. **风格氛围**：写实/动漫/插画/3D？整体情绪？
+
+## 输出要求
+- 80-150字，中文描述
+- 只返回描述文字，不要序号或标签
+- 按"主体 → 背景 → 色彩光线 → 氛围"的顺序描述`,
               },
             ],
           },
@@ -792,22 +826,45 @@ export async function analyzeImageWithText(request: {
               { type: 'image_url', image_url: { url: `data:image/${mime};base64,${imageBase64}` } },
               {
                 type: 'text',
-                text: `用户上传了一张图片并发送了以下指令："${message}"。请结合图片内容理解用户的创作需求。
+                text: `你是视觉创作分析专家（Vision Agent），请结合用户上传的图片和文字指令，分析创作需求。
 
-重要规则：
-- 如果用户说"生成视频"、"宣传片"、"广告片"、"短片"等，action 为 "video"
-- 如果用户说"生成图片"、"海报"、"壁纸"、"插画"等，action 为 "image"  
-- 如果用户说"广告"、"宣传"同时要图片和视频，action 为 "compose"
-- 如果用户说"用这个图片做视频"，把图片内容融入 prompt 描述
-- prompt 必须包含图片中的主体特征（物体、颜色、场景等）
+## 分析流程
+### 第一步：图片内容识别
+提取图片中的关键视觉元素：
+- **主体**：图片中最重要的物体/人物是什么？
+- **场景**：背景环境是什么？（室内/室外/自然/城市）
+- **色彩**：主色调和光线条件？（暖色/冷色/明亮/昏暗）
+- **风格**：图片的视觉风格？（写实/动漫/插画/3D）
 
-返回JSON格式（只返回JSON，不要其他文字）：
+### 第二步：用户指令理解
+用户指令："${message}"
+- 用户想要做什么？（生成新内容/修改图片/抠图/合成）
+- 用户是否有明确的风格/时长/尺寸要求？
+- 用户的指令与图片的关系是什么？
+
+### 第三步：意图分类
+| 用户关键词 | action | 说明 |
+|-----------|--------|------|
+| 生成视频/宣传片/广告片/短片/拍 | **video** | 基于图片内容生成视频 |
+| 生成图片/海报/壁纸/插画/画 | **image** | 基于图片风格生成新图片 |
+| 广告/宣传 + 图片和视频/都要 | **compose** | 同时生成图片和视频 |
+| 修改/改/换/调整 | **modify-image** | 修改图片 |
+| 抠图/去背景/透明 | **remove-bg** | 去除背景 |
+| 合成/拼一起/融合 | **compose-image** | 图片合成 |
+
+### 第四步：prompt 生成
+- 必须包含图片中识别出的主体特征
+- 融合用户指令中的创作方向
+- 英文描述，80-200词
+- 包含：场景 + 主体 + 光线 + 色调 + 运镜（视频）
+
+## 输出格式（严格 JSON，不要其他文字）
 {
-  "description": "图片的视觉描述(50-100字)",
-  "intent": "用户的创作意图推断",
-  "action": "image/video/compose/modify-image/modify-video/general",
-  "prompt": "最终用于生成的详细提示词(中文,100-200字)，包含图片主体描述",
-  "style": "realistic/cinematic/anime/3d/illustration",
+  "description": "图片视觉描述(50-100字)",
+  "intent": "用户创作意图推断",
+  "action": "image",
+  "prompt": "最终用于生成的详细提示词(英文,100-200词)",
+  "style": "realistic",
   "analysis": "综合分析"
 }`,
               },
@@ -904,8 +961,25 @@ export async function generateCaption(request: CaptionRequest): Promise<CaptionR
   }
 
   const styleHint = style ? `，风格为${style}` : '';
-  const systemPrompt = '你是一位富有创意的文案大师。根据用户提供的图片描述，生成一段优美的配图文案。要求：1. 文案必须与图片内容强关联；2. 文案富有诗意和画面感；3. 长度在30-80字之间；4. 只返回文案内容，不要加引号或其他修饰。';
-  const userPrompt = `请为以下图片描述生成一段配图文案：${prompt}${styleHint}`;
+  const systemPrompt = `你是文案创作大师（Caption Agent），负责根据图片描述生成优美的配图文案。
+
+## 文案规则
+1. **强关联**：文案必须与图片主体、场景、氛围紧密相关
+2. **有画面感**：用文字营造视觉想象空间，让读者能"看到"画面
+3. **风格适配**：根据图片风格调整文案风格
+   - 写实/纪实 → 简洁有力，直击人心
+   - 动漫/二次元 → 活泼俏皮，富有想象力
+   - 电影感 → 叙事感强，有故事性
+   - 极简/北欧 → 干净利落，留白意境
+4. **长度控制**：30-80字，精炼有力
+5. **情感共鸣**：文案要能引发读者的情感反应
+
+## 输出要求
+- 只返回文案内容，不要引号或修饰
+- 可适当使用 emoji 增强表现力（1-2个）
+- 避免空洞的套话（如"美丽的""美好的"）`;
+
+  const userPrompt = `请为以下图片描述生成配图文案：${prompt}${styleHint}`;
 
   try {
     const response = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
@@ -1215,8 +1289,30 @@ export async function modifyVideo(request: ModifyVideoRequest): Promise<VideoGen
   console.log(`[ModifyVideo] Original: ${originalPrompt.substring(0, 50)}...`);
   console.log(`[ModifyVideo] Modify: ${modifyInstruction}`);
 
-  const systemPrompt = '你是一位专业的视频修改助手。根据用户的原始视频描述和修改需求，生成新的视频描述。要求：1. 保留原始描述的核心内容和场景；2. 根据修改需求调整相应的部分；3. 生成的描述要完整、详细、自然，适合视频生成；4. 只返回新的视频描述，不要加引号或其他修饰。';
-  const userPrompt = `原始视频描述：${originalPrompt}\n修改需求：${modifyInstruction}\n请生成新的视频描述。`;
+  const systemPrompt = `你是视频修改专家（Video Modifier Agent），负责根据用户修改需求，融合原始视频描述生成新的完整视频描述。
+
+## 修改规则
+1. **保留核心**：原始视频的主题、场景结构、叙事逻辑保持不变
+2. **精准修改**：只修改用户明确要求的部分，不过度发挥
+3. **视觉化表达**：修改后的描述必须适合视频生成，包含具体视觉元素
+
+## 修改类型与处理
+| 修改类型 | 用户关键词 | 处理方式 |
+|---------|-----------|---------|
+| 风格转换 | 动漫/3D/写实/电影感 | 替换风格描述词，调整运镜语言 |
+| 场景调整 | 场景/背景/地点 | 替换场景描述，保留角色和动作 |
+| 时长调整 | 短一点/长一点/xx秒 | 调整叙事节奏，增减场景细节 |
+| 角色修改 | 人物/角色/换成 | 替换角色描述，保留场景和动作 |
+| 色调调整 | 暖色/冷色/明亮/暗调 | 修改光线和色彩描述词 |
+| 运镜调整 | 镜头/特写/远景/跟拍 | 修改 camera movement 描述 |
+
+## 输出要求
+- 只返回新的视频描述，不要引号或修饰
+- 描述长度：80-200词，英文
+- 包含：场景 + 角色 + 动作 + 运镜 + 光线 + 色调
+- 保持与原描述相同的叙事结构`;
+
+  const userPrompt = `原始视频描述：${originalPrompt}\n修改需求：${modifyInstruction}\n\n请生成新的视频描述。`;
 
   let newPrompt = '';
   const apiKey = getApiKey('zhipu') || process.env.ZHIPU_API_KEY;

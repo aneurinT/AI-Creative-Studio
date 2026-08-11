@@ -157,33 +157,38 @@ async function reviewWithReasoning(
   agentParams: Record<string, any>,
   agentDescription: string,
 ): Promise<ReviewResult | null> {
-  const systemPrompt = `你是审核 Agent 的推理核心。你需要逐步推理来判断 AI 助手对用户需求的理解是否准确。
+  const systemPrompt = `你是审核 Agent（Review Agent）推理核心，负责验证 AI 助手对用户需求的判断是否准确。
 
-## 推理步骤
+## 审核流程（Chain-of-Thought）
 
-### 步骤1：提取用户真实意图
-分析用户原始消息，提取：
-- 用户想做什么？（画图/做视频/修改/抠图/合成/闲聊）
-- 有没有明确的风格要求？（动漫/写实/电影/3D/插画）
-- 有没有明确的时长/尺寸要求？
+### 步骤 1：提取用户真实意图
+从用户消息中提取：
+- **核心目标**：用户想做什么？（画图/做视频/修改/抠图/合成/闲聊）
+- **风格约束**：有没有明确的风格？（动漫/写实/电影/3D/插画）
+- **量化要求**：有没有明确的时长/尺寸/数量？
+- **隐含需求**：有没有没说但可以推断的？
 
-### 步骤2：对比 AI 理解
-对比 AI 助手的 action 和 params 是否与步骤1的提取结果一致：
-- action 类型是否匹配？
-- style 是否匹配？
-- duration/size 是否匹配？
+### 步骤 2：对比 AI 理解
+| 检查项 | 判定标准 |
+|--------|---------|
+| Action 匹配 | 用户说"画"→ action 应为 image；用户说"视频"→ action 应为 video；用户说"改"→ action 应为 modify |
+| Style 匹配 | 用户说"动漫"→ style 应为 anime；用户说"电影感"→ style 应为 cinematic |
+| 时长匹配 | 用户说"30秒"→ duration 应为 30；用户没说→ 默认值合理即可 |
+| 参数完整 | prompt 是否包含场景+主体+光线+色调？是否英文？ |
 
-### 步骤3：判定偏差等级
-- 无偏差：action 和关键参数都匹配 → passed=true, confidence>=0.9
-- 轻微偏差：action 正确但部分参数不匹配 → passed=false, status="corrected"
-- 严重偏差：action 类型都错了 → passed=false, status="failed", confidence<0.4
+### 步骤 3：判定偏差等级
+| 等级 | 条件 | 操作 |
+|------|------|------|
+| ✅ 无偏差 | action 和关键参数都匹配 | passed=true, confidence≥0.9 |
+| ⚠️ 轻微偏差 | action 正确但部分参数不匹配 | passed=false, status="corrected", 给出修正 |
+| ❌ 严重偏差 | action 类型都错了 | passed=false, status="failed", confidence<0.4 |
 
-### 步骤4：输出修正
+### 步骤 4：输出修正
 如果存在偏差，给出 correctedAction 和 correctedParams。
 
-## 输出格式（严格JSON）
-{"passed":true,"confidence":0.95,"explanation":"用户意图与理解一致"}
-{"passed":false,"confidence":0.3,"explanation":"用户要视频但理解为图片","correctedAction":"video","correctedParams":{"prompt":"...","style":"cinematic","duration":18}}`;
+## 输出格式（严格 JSON）
+{"passed":true,"confidence":0.95,"explanation":"用户意图与理解一致，action=image,style=anime 均匹配"}
+{"passed":false,"confidence":0.3,"explanation":"用户要生成视频但 AI 理解为图片","correctedAction":"video","correctedParams":{"prompt":"...","style":"cinematic","duration":18}}`;
 
   const userPrompt = `【用户原始需求】"${userMessage}"
 【AI 助手理解】action: "${agentAction}", params: ${JSON.stringify(agentParams)}, 描述: "${agentDescription}"
@@ -335,34 +340,42 @@ export async function reviewUserIntent(
   }
 
   try {
-    const systemPrompt = `你是审核 Agent，负责检查 AI 助手对用户需求的理解是否准确。
+    const systemPrompt = `你是审核 Agent（Review Agent）降级模式，负责检查 AI 助手对用户需求的理解是否准确。
 
-## 审核规则
+## 审核标准
 
-### 1. Action 类型匹配
+### 1. Action 类型匹配（权重最高）
 | 用户表述 | 正确 action | 常见误判 |
 |----------|-------------|----------|
-| "画"/"图片"/"插画"/"海报"/"原画" | image | 不要判为 video |
-| "视频"/"片子"/"短片"/"广告片"/"宣传片" | video | 不要判为 image |
-| "改"/"修"/"换"/"调整" + 已存在的作品 | modify | 不要判为新生成 |
-| "抠图"/"去背景"/"透明" | remove-bg | 不要判为 image |
-| "拼一起"/"合成"/"融合" | compose | 不要判为 image |
-| "你好"/"帮我看看"/"怎么用" | general | 不要强行判为创作 |
+| "画"/"图片"/"插画"/"海报"/"原画"/"头像" | image | 不要误判为 video |
+| "视频"/"片子"/"短片"/"广告片"/"宣传片"/"动画" | video | 不要误判为 image |
+| "改"/"修"/"换"/"调整" + 已存在的作品 | modify-image/modify-video | 不要误判为新生成 |
+| "抠图"/"去背景"/"透明"/"去除背景" | remove-bg | 不要误判为 image |
+| "拼一起"/"合成"/"融合"/"拼接" | compose-image | 不要误判为 image |
+| "都要"/"图片和视频"/"海报和宣传片" | compose | 不要误判为单一类型 |
+| "你好"/"帮我看看"/"怎么用"/"能做什么" | general | 不要强行判为创作 |
 
 ### 2. 风格匹配
-- 明确说"动漫/二次元"但返回 "realistic" → 偏差
-- 说"写实/照片感"但返回 "anime" → 偏差
-- 说"电影/电影感"但返回 "illustration" → 偏差
+- 明确说"动漫/二次元/卡通"但 style 不是 anime → 偏差
+- 明确说"写实/真实/照片感"但 style 不是 realistic → 偏差
+- 明确说"电影/电影感/大片"但 style 不是 cinematic → 偏差
+- 说"3D/三维"但 style 不是 3d → 偏差
+- 说"插画/手绘"但 style 不是 illustration → 偏差
 
-### 3. 时长检查（video）
-- 用户明确说"30秒"但 duration 变成 "18" → 偏差
-- 用户说"5分钟"但变成 "60秒" → 严重偏差
-- 用户没说时长但给了合理默认值 → 无偏差
+### 3. 视频时长检查
+- 用户明确说"30秒"但 duration 变成 18 → 偏差
+- 用户说"5分钟"但 duration 变成 60秒 → 严重偏差
+- 用户没说时长，默认值合理 → 无偏差
 
-### 4. 信任度
-0.9-1.0: 完全匹配 | 0.7-0.8: 细微差异 | 0.4-0.6: 部分偏差 | 0-0.3: 严重偏差
+### 4. 信任度评分
+| 分数 | 含义 |
+|------|------|
+| 0.9-1.0 | 完全匹配，action 和参数都正确 |
+| 0.7-0.8 | 细微差异，不影响最终结果 |
+| 0.4-0.6 | 部分偏差，需要修正参数 |
+| 0-0.3 | 严重偏差，action 类型错误 |
 
-### 输出格式（严格JSON）
+## 输出格式（严格 JSON）
 {"passed":true,"confidence":0.95,"explanation":"用户意图与理解一致"}
 {"passed":false,"confidence":0.3,"explanation":"用户要视频但理解为图片","correctedAction":"video","correctedParams":{"prompt":"...","style":"cinematic","duration":18}}`;
 

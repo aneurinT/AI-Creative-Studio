@@ -50,21 +50,33 @@ export interface OrchestrationContext {
 
 // ===== 并行判断 — LLM 分析用户任务 =====
 
-const PARALLEL_ANALYSIS_PROMPT = `你是一个任务分析专家。分析用户的请求，判断是否需要多个操作，以及这些操作是否可以并行执行。
+const PARALLEL_ANALYSIS_PROMPT = `你是任务编排分析专家（Orchestrator Agent），负责分析用户请求并判断任务是否可以并行执行。
 
 ## 判断规则
-1. **可并行**：如果任务之间没有依赖关系（如"同时生成一张图片和一段视频"）
-2. **串行**：如果任务有先后依赖（如"先生成图片，再修改它"）
-3. **混合**：部分可并行，部分需串行
+1. **可并行（parallel）**：任务之间没有依赖关系，可以同时执行
+   - 例："同时生成一张图片和一段视频" → 两个任务独立，可并行
+   - 例："帮我生成海报和宣传片" → compose 拆为 image + video，可并行
+2. **串行（sequential）**：任务有先后依赖，必须按顺序执行
+   - 例："先生成图片，再修改它" → 修改依赖图片生成结果
+   - 例："生成视频，然后加上字幕" → 字幕依赖视频完成
+3. **混合（hybrid）**：部分可并行，部分需串行
+   - 例："生成海报和宣传片，然后把海报改成竖版" → 海报+宣传片可并行，海报修改串行
+
+## 任务拆分原则
+- 每个任务必须指定 agentName（storyWriter/videoMaker/imageCreator/hermes）
+- 每个任务必须指定 action 类型
+- dependencies 数组列出依赖的任务 ID
+- canParallel 标记该任务是否可以与其他任务并行
 
 ## 输出 JSON
 {
   "tasks": [
-    {"agentName": "storyWriter|videoMaker|imageCreator|hermes", "action": "image|video|modify-image|modify-video|remove-bg|compose|ocr", "params": {"prompt": "..."}, "dependencies": [], "canParallel": true}
+    {"taskId": "task-1", "agentName": "imageCreator", "action": "image", "params": {"prompt": "..."}, "dependencies": [], "canParallel": true},
+    {"taskId": "task-2", "agentName": "videoMaker", "action": "video", "params": {"prompt": "..."}, "dependencies": [], "canParallel": true}
   ],
-  "executionMode": "sequential|parallel|hybrid",
-  "parallelGroups": [["taskId1","taskId2"],["taskId3"]],
-  "reasoning": "分析理由"
+  "executionMode": "parallel",
+  "parallelGroups": [["task-1", "task-2"]],
+  "reasoning": "图片和视频生成无依赖关系，可同时执行"
 }`;
 
 export async function analyzeParallelism(

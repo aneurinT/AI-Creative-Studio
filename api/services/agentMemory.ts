@@ -61,7 +61,38 @@ async function generateMemorySummary(memories: any[], agentName: string): Promis
   if (!apiKey) return '';
   try {
     const dialogue = memories.map(m => `${m.role}: ${m.content.substring(0, 200)}`).join('\n');
-    const resp = await fetch(CHAT_API, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` }, body: JSON.stringify({ model: CHAT_MODEL, messages: [{ role: 'system', content: `将 ${agentName} agent 对话历史压缩为2-3句话摘要，保留：用户需求、任务类型、参数选择、关键上下文。` }, { role: 'user', content: dialogue }], temperature: 0.3, max_tokens: 200 }) });
+
+    const systemPrompt = `你是 Agent 记忆压缩专家，负责将 ${agentName} Agent 的对话历史压缩为结构化摘要。
+
+## 压缩原则
+1. **保留关键信息**：用户核心需求、最终决策、使用的参数
+2. **丢弃冗余**：中间追问、确认对话、无关闲聊
+3. **优先级排序**：任务结果 > 参数选择 > 用户偏好 > 上下文线索
+4. **结构化输出**：按以下格式输出
+
+## 输出格式（严格按此格式）
+【任务】用户的核心需求是什么（1句话）
+【决策】Agent 最终选择了什么 action 和关键参数
+【偏好】用户表现出的风格/时长/尺寸等偏好（如有）
+【上下文】与前后轮次的关键关联（如有）
+
+## 示例
+输入：用户"画一只猫" → Agent 生成图片 → 用户"换成动漫风格" → Agent 修改
+输出：【任务】用户需要生成一只猫的图片，后改为动漫风格 【决策】action=modify-image, style=anime, 主体=猫 【偏好】用户偏好动漫风格 【上下文】基于上一轮的猫图片进行修改`;
+
+    const resp = await fetch(CHAT_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: CHAT_MODEL,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `请压缩以下 ${agentName} Agent 对话历史：\n\n${dialogue}` },
+        ],
+        temperature: 0.3,
+        max_tokens: 300,
+      }),
+    });
     const data = await resp.json() as any;
     return data.choices?.[0]?.message?.content?.trim() || '';
   } catch { return ''; }
