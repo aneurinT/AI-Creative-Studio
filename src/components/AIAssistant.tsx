@@ -209,7 +209,10 @@ export default function AIAssistant() {
   }, [messages]);
 
   // 获取所有未完成的生成任务
+  // 增加僵尸任务保护：超过 30 分钟仍 isGenerating 的任务视为僵尸，自动忽略
   function getPendingTasks(): ChatMessage[] {
+    const now = Date.now();
+    const ZOMBIE_TIMEOUT_MS = 30 * 60 * 1000; // 30 分钟
     return messages.filter(m => {
       if (m.actionType !== 'video' && m.actionType !== 'image') return false
       if (m.isGenerating !== true) return false
@@ -221,6 +224,8 @@ export default function AIAssistant() {
         m.content.includes('视频生成失败') ||
         m.content.includes('图片生成失败')
       )) return false
+      // 僵尸任务保护：超过 30 分钟仍 isGenerating 的任务不再显示
+      if (m.timestamp && (now - m.timestamp) > ZOMBIE_TIMEOUT_MS) return false
       return true
     })
   }
@@ -873,7 +878,7 @@ export default function AIAssistant() {
     }
   }
 
-  async function callStoryWriter(message: string): Promise<{ success: boolean; script?: string; thoughts?: AgentThought[]; sessionId?: string; reasoning?: string; modelUsed?: string }> {
+  async function callStoryWriter(message: string, imageUrls?: string[]): Promise<{ success: boolean; script?: string; thoughts?: AgentThought[]; sessionId?: string; reasoning?: string; modelUsed?: string }> {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 30000);
@@ -882,6 +887,7 @@ export default function AIAssistant() {
         headers: authHeaders(),
         body: JSON.stringify({
           message,
+          imageUrls: imageUrls && imageUrls.length > 0 ? imageUrls : undefined,
           history: messages.slice(-10).map(m => ({ role: m.role, content: m.content, actionType: m.actionType, params: m.params, generatedImage: m.generatedImage, generatedVideo: m.generatedVideo, originalPrompt: m.originalPrompt })),
         }),
         signal: controller.signal,
@@ -902,7 +908,7 @@ export default function AIAssistant() {
     }
   }
 
-  async function callVideoAnalyzer(script: string, sessionId?: string, originalMessage?: string): Promise<{ success: boolean; result?: Record<string, any>; thoughts?: AgentThought[]; reasoning?: string; modelUsed?: string }> {
+  async function callVideoAnalyzer(script: string, sessionId?: string, originalMessage?: string, imageUrls?: string[]): Promise<{ success: boolean; result?: Record<string, any>; thoughts?: AgentThought[]; reasoning?: string; modelUsed?: string }> {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 30000);
@@ -913,6 +919,7 @@ export default function AIAssistant() {
           script,
           sessionId,
           originalMessage,
+          imageUrls: imageUrls && imageUrls.length > 0 ? imageUrls : undefined,
           history: messages.slice(-10).map(m => ({ role: m.role, content: m.content, actionType: m.actionType, params: m.params, generatedImage: m.generatedImage, generatedVideo: m.generatedVideo, originalPrompt: m.originalPrompt })),
         }),
         signal: controller.signal,
@@ -932,7 +939,7 @@ export default function AIAssistant() {
     }
   }
 
-  async function callImageAnalyzer(message: string): Promise<{ success: boolean; result?: Record<string, any>; thoughts?: AgentThought[]; reasoning?: string; modelUsed?: string }> {
+  async function callImageAnalyzer(message: string, imageUrls?: string[]): Promise<{ success: boolean; result?: Record<string, any>; thoughts?: AgentThought[]; reasoning?: string; modelUsed?: string }> {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 20000);
@@ -941,6 +948,7 @@ export default function AIAssistant() {
         headers: authHeaders(),
         body: JSON.stringify({
           message,
+          imageUrls: imageUrls && imageUrls.length > 0 ? imageUrls : undefined,
           history: messages.slice(-10).map(m => ({ role: m.role, content: m.content, actionType: m.actionType, params: m.params, generatedImage: m.generatedImage, generatedVideo: m.generatedVideo, originalPrompt: m.originalPrompt })),
         }),
         signal: controller.signal,
@@ -1920,37 +1928,62 @@ export default function AIAssistant() {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
 
+    // 只保留图片文件
+    const imageFiles = files.filter(f => f.type.startsWith('image/'));
+    if (imageFiles.length === 0) return;
+
+    // 显示上传提示（仅一条）
+    const uploadMsgId = `uploading-${Date.now()}`;
+    setMessages(prev => [...prev, {
+      id: uploadMsgId,
+      role: 'assistant',
+      content: `📤 正在上传 ${imageFiles.length} 张图片...`,
+      timestamp: Date.now(),
+    }]);
+
     const newUrls: string[] = [];
+    const errors: string[] = [];
 
-    for (const file of files) {
-      if (!file.type.startsWith('image/')) continue;
-
-      setMessages(prev => [...prev, {
-        id: `uploading-${Date.now()}`,
-        role: 'assistant',
-        content: `📤 正在上传 ${file.name}...`,
-        timestamp: Date.now(),
-      }]);
-
+    // 串行上传（避免并发限流）
+    for (const file of imageFiles) {
       const formData = new FormData();
       formData.append('image', file);
 
       try {
         const response = await fetch('/api/upload/image', { method: 'POST', body: formData });
-        const result = await response.json();
-        setMessages(prev => prev.filter(m => !m.id.startsWith('uploading-')));
-        if (result.success) {
-          newUrls.push(result.imageUrl);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
         }
-      } catch {
-        setMessages(prev => prev.filter(m => !m.id.startsWith('uploading-')));
+        const result = await response.json();
+        if (result.success && result.imageUrl) {
+          newUrls.push(result.imageUrl);
+        } else {
+          errors.push(`${file.name}: ${result.error || '上传失败'}`);
+        }
+      } catch (err) {
+        errors.push(`${file.name}: ${(err as Error).message}`);
+        console.error('[Upload] Failed:', file.name, err);
       }
     }
 
+    // 清除上传提示
+    setMessages(prev => prev.filter(m => m.id !== uploadMsgId));
+
+    // 显示结果
     if (newUrls.length > 0) {
-      setPendingAttachmentImages(prev => [...prev, ...newUrls].slice(0, 5)); // 最多5张
+      setPendingAttachmentImages(prev => [...prev, ...newUrls].slice(0, 5));
+    }
+    
+    if (errors.length > 0 && newUrls.length === 0) {
+      setMessages(prev => [...prev, {
+        id: `upload-error-${Date.now()}`,
+        role: 'assistant',
+        content: `❌ 图片上传失败: ${errors.join('; ')}`,
+        timestamp: Date.now(),
+      }]);
     }
 
+    // 重置 input（允许重复选择同一文件）
     if (multiFileInputRef.current) multiFileInputRef.current.value = '';
   }
 
@@ -2320,7 +2353,7 @@ export default function AIAssistant() {
             }));
           }, 800);
 
-          const storyResult = await callStoryWriter(sendText);
+          const storyResult = await callStoryWriter(sendText, imageUrls);
           clearInterval(storyThoughtTimer);
           
           // 🔍 审核 Agent：实时审核脚本质量
@@ -2386,7 +2419,7 @@ export default function AIAssistant() {
               }));
             }, 800);
 
-            const analyzeResult = await callVideoAnalyzer(storyResult.script, storyResult.sessionId, sendText);
+            const analyzeResult = await callVideoAnalyzer(storyResult.script, storyResult.sessionId, sendText, imageUrls);
             clearInterval(analyzerThoughtTimer);
 
             if (analyzeResult.success && analyzeResult.result) {
@@ -2452,7 +2485,7 @@ export default function AIAssistant() {
             }));
           }, 800);
 
-          const analyzeResult = await callImageAnalyzer(sendText);
+          const analyzeResult = await callImageAnalyzer(sendText, imageUrls);
           clearInterval(imgThoughtTimer);
 
           if (analyzeResult.success && analyzeResult.result) {

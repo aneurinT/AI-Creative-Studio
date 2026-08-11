@@ -24,8 +24,15 @@ const ImageUploader: React.FC<ImageUploaderProps> = ({ onImageUploaded, onGenera
     formData.append('image', file);
 
     try {
+      const token = localStorage.getItem('token');
+      const headers: Record<string, string> = {};
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
       const response = await fetch('/api/upload/image', {
         method: 'POST',
+        headers,
         body: formData,
       });
 
@@ -37,7 +44,7 @@ const ImageUploader: React.FC<ImageUploaderProps> = ({ onImageUploaded, onGenera
         onImageUploaded(fullUrl);
         setProgress(100);
       } else {
-        alert(`上传失败: ${result.error}`);
+        alert(`上传失败: ${result.error || '未知错误'}`);
       }
     } catch (error) {
       console.error('Upload error:', error);
@@ -93,11 +100,15 @@ const ImageUploader: React.FC<ImageUploaderProps> = ({ onImageUploaded, onGenera
     const imagePath = `/uploads/${match[1]}`;
 
     try {
+      const token = localStorage.getItem('token');
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
       const response = await fetch('/api/upload/image/video', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({
           imageUrl: imagePath,
           style: 'realistic',
