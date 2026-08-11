@@ -54,6 +54,9 @@ import ltxRoutes from './routes/ltx.js'
 import knowledgeRoutes from './routes/knowledge.js'
 import ocrRoutes from './routes/ocr.js'
 import collaborationRoutes from './routes/collaboration.js'
+import a2aRoutes from './routes/a2a.js'
+import socialMediaRoutes from './routes/socialMedia.js'
+import officeRoutes from './routes/office.js'
 import { registerMCPRoutes } from './services/toolRegistry.js'
 import { seedKnowledgeBase } from './services/ragKnowledge.js'
 import { getConcurrencyStats } from './services/concurrencyService.js'
@@ -113,6 +116,12 @@ app.use('/api/ltx', ltxRoutes)
 app.use('/api/knowledge', knowledgeRoutes)
 app.use('/api/ocr', ocrRoutes)
 app.use('/api/collaboration', collaborationRoutes)
+app.use('/api/a2a', a2aRoutes)
+app.use('/api/social', socialMediaRoutes)
+app.use('/api/office', officeRoutes)
+
+// A2A Agent Card 发现端点（无需 /api 前缀，符合 A2A 规范）
+app.use(a2aRoutes)
 
 // MCP 协议 + Tool Registry 路由
 const mcpRouter = express.Router();
