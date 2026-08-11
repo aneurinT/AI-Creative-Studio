@@ -1,0 +1,39 @@
+# 前端构建 Dockerfile
+FROM node:22-alpine AS builder
+
+WORKDIR /app
+
+# 复制依赖文件
+COPY package.json ./
+RUN npm install
+
+# 复制源码
+COPY index.html ./
+COPY vite.config.ts ./
+COPY tailwind.config.js ./
+COPY postcss.config.js ./
+COPY tsconfig.json ./
+COPY tsconfig.app.json ./
+COPY tsconfig.node.json ./
+COPY src/ ./src/
+COPY public/ ./public/
+COPY api/ ./api/
+
+# 构建前端
+RUN npx vite build
+
+# ===== 生产阶段 =====
+FROM nginx:alpine
+
+# 复制构建产物
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+# 复制 Nginx 配置
+COPY nginx.docker.conf /etc/nginx/nginx.conf
+
+# 静态资源目录
+RUN mkdir -p /usr/share/nginx/public
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]

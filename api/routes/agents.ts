@@ -5,6 +5,8 @@ import { REASONING_MODEL, REASONING_API, getReasoningApiKey, REASONING_FALLBACK_
 import { recordAgentTurn, checkAndCompress, getAgentContext, remember, recall } from '../services/agentMemory.js';
 import { toolRegistry } from '../services/toolRegistry.js';
 import { analyzeParallelism, executePlan, type OrchestrationContext } from '../services/orchestrator.js';
+import { analyzeImageWithText } from '../services/imageService.js';
+import { supervisorRoute } from '../services/modelRouter.js';
 
 const execAsync = promisify(exec);
 const router = Router();
@@ -12,6 +14,45 @@ const router = Router();
 const HERMES_PYTHON_PATH = process.platform === 'win32' ? 'python' : 'python3';
 const HERMES_MODULE = 'hermes_cli.main';
 const HERMES_TIMEOUT = 30_000; // 30秒超时（异步不阻塞事件循环）
+
+/**
+ * 多模态预处理：如果用户提供了图片，先用视觉模型分析图片内容，
+ * 将图片描述融入用户消息中，让 Agent 能"看到"图片内容进行创作
+ * @returns 增强后的 message 字符串（包含图片描述）
+ */
+async function enrichMessageWithVision(
+  message: string,
+  imageUrls?: string[],
+): Promise<{ message: string; imageDescription?: string }> {
+  if (!imageUrls || imageUrls.length === 0) {
+    return { message };
+  }
+
+  try {
+    const primaryImage = imageUrls[0];
+    console.log(`[Agent Vision] Analyzing image for agent: ${primaryImage.substring(0, 80)}...`);
+    
+    const visionResult = await analyzeImageWithText({
+      imageUrl: primaryImage,
+      message: message,
+    });
+
+    if (visionResult?.description) {
+      const extraImagesNote = imageUrls.length > 1
+        ? `（用户还提供了 ${imageUrls.length - 1} 张参考图片）`
+        : '';
+      
+      const enrichedMessage = `【参考图片视觉描述】${visionResult.description}${extraImagesNote}\n\n【用户指令】${message}\n\n请基于以上图片内容和用户指令进行创作。你的创作应该以图片中的主体、场景、风格为参考基础。`;
+      
+      console.log(`[Agent Vision] Image analyzed: ${visionResult.description.substring(0, 60)}...`);
+      return { message: enrichedMessage, imageDescription: visionResult.description };
+    }
+  } catch (err) {
+    console.warn('[Agent Vision] Analysis failed, falling back to text-only:', (err as Error).message);
+  }
+
+  return { message };
+}
 
 interface AgentThought {
   agentName: string;
@@ -105,8 +146,31 @@ async function checkHermesInstalled(): Promise<boolean> {
   }
 }
 
-/** 使用推理模型进行专家级深度分析（DeepSeek-R1 / GLM-Z1） */
-async function callReasoningAgent(message: string, systemPrompt: string, sessionId: string, history?: any[]): Promise<{ content: string; reasoning: string } | null> {
+/** 使用推理模型进行专家级深度分析（DeepSeek-R1 / GLM-Z1）
+ *  调度 Agent 决策：如果场景不需要深度推理，直接返回 null 触发降级到小模型 */
+async function callReasoningAgent(
+  message: string,
+  systemPrompt: string,
+  sessionId: string,
+  history?: any[],
+  agentName?: string,
+  intent?: string,
+): Promise<{ content: string; reasoning: string } | null> {
+  // ===== 调度 Agent 决策 =====
+  const supervisor = supervisorRoute({
+    agentName,
+    intent,
+    messageLength: message.length,
+    historyLength: (history || []).length,
+  });
+
+  if (!supervisor.useReasoning) {
+    console.log(`[Supervisor] 跳过推理模型: ${supervisor.scenario} → ${supervisor.model} | ${supervisor.reason}`);
+    return null; // 触发调用方降级到小模型
+  }
+
+  console.log(`[Supervisor] 使用推理模型: ${supervisor.scenario} → ${supervisor.model} | ${supervisor.reason}`);
+
   // 获取 Agent 上下文（含历史任务记录）
   const context = agentContexts.get(sessionId);
   const prevResult = context?.finalResult ? JSON.stringify(context.finalResult).substring(0, 800) : '';
@@ -457,7 +521,11 @@ router.get('/context/:sessionId/thoughts', (req: Request, res: Response) => {
 
 router.post('/story/write', async (req: Request, res: Response) => {
   try {
-    const { message, sessionId: existingSessionId, history } = req.body;
+    const { message, sessionId: existingSessionId, history, imageUrls } = req.body;
+    
+    // 多模态预处理：分析参考图片
+    const visionResult = await enrichMessageWithVision(message, imageUrls);
+    const enrichedMessage = visionResult.message;
     
     const sessionId = existingSessionId || generateSessionId();
     const config = AGENT_CONFIGS.storyWriter;
@@ -465,7 +533,7 @@ router.post('/story/write', async (req: Request, res: Response) => {
     const existingContext = agentContexts.get(sessionId);
     const context: AgentContext = existingContext || {
       sessionId,
-      userInput: message,
+      userInput: enrichedMessage,
       thoughts: [],
       taskHistory: [],
       createdAt: Date.now(),
@@ -488,8 +556,8 @@ router.post('/story/write', async (req: Request, res: Response) => {
       timestamp: Date.now(),
     });
 
-    // 优先使用推理模型进行深度分析
-    const reasoningResult = await callReasoningAgent(message, config.systemPrompt, sessionId, history);
+    // 优先使用推理模型进行深度分析（调度Agent决定是否使用推理模型）
+    const reasoningResult = await callReasoningAgent(enrichedMessage, config.systemPrompt, sessionId, history, config.role, 'video');
     let hermesResponse = '';
     let reasoningTrace = '';
 
@@ -498,7 +566,7 @@ router.post('/story/write', async (req: Request, res: Response) => {
       reasoningTrace = reasoningResult.reasoning;
     } else {
       // 降级到指令模型
-      hermesResponse = await callHermesWithContext(message, config.systemPrompt, sessionId, history, config.role);
+      hermesResponse = await callHermesWithContext(enrichedMessage, config.systemPrompt, sessionId, history, config.role);
     }
     
     let script = '';
@@ -551,7 +619,11 @@ router.post('/story/write', async (req: Request, res: Response) => {
 
 router.post('/video/analyze', async (req: Request, res: Response) => {
   try {
-    const { script, sessionId: existingSessionId, originalMessage, history } = req.body;
+    const { script, sessionId: existingSessionId, originalMessage, history, imageUrls } = req.body;
+    
+    // 多模态预处理：分析参考图片，将视觉信息融入脚本
+    const visionResult = await enrichMessageWithVision(script, imageUrls);
+    const enrichedScript = visionResult.message;
     
     const sessionId = existingSessionId || generateSessionId();
     const config = AGENT_CONFIGS.videoMaker;
@@ -582,8 +654,8 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
       timestamp: Date.now(),
     });
 
-    // 优先使用推理模型
-    const reasoningResult = await callReasoningAgent(script, config.systemPrompt, sessionId, history);
+    // 优先使用推理模型（调度Agent决定）
+    const reasoningResult = await callReasoningAgent(enrichedScript, config.systemPrompt, sessionId, history, config.role, 'video');
     let hermesResponse = '';
     let reasoningTrace = '';
 
@@ -591,11 +663,11 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
       hermesResponse = reasoningResult.content;
       reasoningTrace = reasoningResult.reasoning;
     } else {
-      hermesResponse = await callHermesWithContext(script, config.systemPrompt, sessionId, history, config.role);
+      hermesResponse = await callHermesWithContext(enrichedScript, config.systemPrompt, sessionId, history, config.role);
     }
     
     // 短期记忆
-    recordAgentTurn({ sessionId, agentName: config.role, turnIndex: 0, role: 'user', content: script?.substring(0, 300) });
+    recordAgentTurn({ sessionId, agentName: config.role, turnIndex: 0, role: 'user', content: enrichedScript?.substring(0, 300) });
     checkAndCompress(sessionId, config.role).catch(() => {});
 
     let analysis = {};
@@ -605,13 +677,13 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
         if (jsonMatch) {
           analysis = JSON.parse(jsonMatch[0]);
         } else {
-          analysis = parseAnalysisFromText(hermesResponse, script);
+          analysis = parseAnalysisFromText(hermesResponse, enrichedScript);
         }
       } catch {
         analysis = parseAnalysisFromText(hermesResponse, script);
       }
     } else {
-      analysis = generateMockVideoAnalysis(script);
+      analysis = generateMockVideoAnalysis(enrichedScript);
     }
 
     context.thoughts.push({
@@ -650,7 +722,11 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
 
 router.post('/image/analyze', async (req: Request, res: Response) => {
   try {
-    const { message, sessionId: existingSessionId, history } = req.body;
+    const { message, sessionId: existingSessionId, history, imageUrls } = req.body;
+    
+    // 多模态预处理：分析参考图片
+    const visionResult = await enrichMessageWithVision(message, imageUrls);
+    const enrichedMessage = visionResult.message;
     
     const sessionId = existingSessionId || generateSessionId();
     const config = AGENT_CONFIGS.imageCreator;
@@ -681,8 +757,8 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
       timestamp: Date.now(),
     });
 
-    // 优先使用推理模型
-    const reasoningResult = await callReasoningAgent(message, config.systemPrompt, sessionId, history);
+    // 优先使用推理模型（调度Agent决定）
+    const reasoningResult = await callReasoningAgent(enrichedMessage, config.systemPrompt, sessionId, history, config.role, 'image');
     let hermesResponse = '';
     let reasoningTrace = '';
 
@@ -690,7 +766,7 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
       hermesResponse = reasoningResult.content;
       reasoningTrace = reasoningResult.reasoning;
     } else {
-      hermesResponse = await callHermesWithContext(message, config.systemPrompt, sessionId, history);
+      hermesResponse = await callHermesWithContext(enrichedMessage, config.systemPrompt, sessionId, history);
     }
     
     // 短期记忆
@@ -749,7 +825,11 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
 
 router.post('/video/generate', async (req: Request, res: Response) => {
   try {
-    const { sessionId, script, originalMessage, history } = req.body;
+    const { sessionId, script, originalMessage, history, imageUrls } = req.body;
+    
+    // 多模态预处理
+    const visionResult = await enrichMessageWithVision(script, imageUrls);
+    const enrichedScript = visionResult.message;
     
     const config = AGENT_CONFIGS.videoMaker;
     const existingContext = agentContexts.get(sessionId || '');
@@ -778,8 +858,8 @@ router.post('/video/generate', async (req: Request, res: Response) => {
       timestamp: Date.now(),
     });
 
-    // 优先使用推理模型
-    const reasoningResult = await callReasoningAgent(script, config.systemPrompt, sessionId, history);
+    // 优先使用推理模型（调度Agent决定）
+    const reasoningResult = await callReasoningAgent(enrichedScript, config.systemPrompt, sessionId, history, config.role, 'video');
     let hermesResponse = '';
     let reasoningTrace = '';
 
@@ -787,11 +867,11 @@ router.post('/video/generate', async (req: Request, res: Response) => {
       hermesResponse = reasoningResult.content;
       reasoningTrace = reasoningResult.reasoning;
     } else {
-      hermesResponse = await callHermesWithContext(script, config.systemPrompt, sessionId, history, config.role);
+      hermesResponse = await callHermesWithContext(enrichedScript, config.systemPrompt, sessionId, history, config.role);
     }
     
     // 短期记忆
-    recordAgentTurn({ sessionId, agentName: config.role, turnIndex: 0, role: 'user', content: script?.substring(0, 300) });
+    recordAgentTurn({ sessionId, agentName: config.role, turnIndex: 0, role: 'user', content: enrichedScript?.substring(0, 300) });
     checkAndCompress(sessionId, config.role).catch(() => {});
 
     let analysis = {};
@@ -801,13 +881,13 @@ router.post('/video/generate', async (req: Request, res: Response) => {
         if (jsonMatch) {
           analysis = JSON.parse(jsonMatch[0]);
         } else {
-          analysis = parseAnalysisFromText(hermesResponse, script);
+          analysis = parseAnalysisFromText(hermesResponse, enrichedScript);
         }
       } catch {
         analysis = parseAnalysisFromText(hermesResponse, script);
       }
     } else {
-      analysis = generateMockVideoAnalysis(script);
+      analysis = generateMockVideoAnalysis(enrichedScript);
     }
 
     context.thoughts.push({

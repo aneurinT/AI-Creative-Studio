@@ -10,7 +10,7 @@ import { setSSEHeaders, sendSSEEvent, sendSSEEnd, sendSSEError, streamLLM } from
 import { addOperationLog } from '../services/database.js';
 import { recall, remember, recordAgentTurn, checkAndCompress, getAgentContext } from '../services/agentMemory.js';
 import { toolRegistry } from '../services/toolRegistry.js';
-import { smartRoute } from '../services/modelRouter.js';
+import { smartRoute, supervisorRoute } from '../services/modelRouter.js';
 import { llmQueue, llmCircuitBreaker } from '../services/concurrencyService.js';
 
 import { CHAT_MODEL, CHAT_API, getChatApiKey, CHAT_FALLBACK_MODEL, CHAT_FALLBACK_API, getChatFallbackApiKey, REASONING_MODEL, REASONING_API, getReasoningApiKey, REASONING_FALLBACK_MODEL, REASONING_FALLBACK_API, getReasoningFallbackApiKey } from '../services/llmConfig.js';
@@ -677,11 +677,22 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    // 优先使用推理模型进行深度意图分析（DeepSeek-R1 / GLM-Z1）
-    const reasoningResult = await llmCircuitBreaker.call(
-      () => callReasoningLLM(message, history || []),
-      () => Promise.resolve(null) // 熔断时回退到 null，触发降级
-    );
+    // ===== 调度 Agent 决策：根据场景选择模型 =====
+    const supervisor = supervisorRoute({
+      messageLength: message.length,
+      historyLength,
+      hasImages: false, // /chat 端点没有图片（图片走 chat-with-image）
+    });
+    console.log(`[Supervisor] ${supervisor.scenario} → ${supervisor.model} | ${supervisor.reason} | reasoning=${supervisor.useReasoning}`);
+
+    let reasoningResult: any = null;
+    // 只有调度 Agent 决定需要深度推理时才用推理模型
+    if (supervisor.useReasoning) {
+      reasoningResult = await llmCircuitBreaker.call(
+        () => callReasoningLLM(message, history || []),
+        () => Promise.resolve(null)
+      );
+    }
     if (reasoningResult) {
       if (ragResult.template) { reasoningResult.params.prompt = (reasoningResult.params.prompt || message) + ' | ' + ragResult.template.prompt.substring(0, 150); }
       if (ragResult.style) { reasoningResult.params.style = ragResult.style.keywords[0] === '动漫' ? 'anime' : reasoningResult.params.style; }

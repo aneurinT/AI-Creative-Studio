@@ -178,10 +178,97 @@ export const MODEL_STRATEGY: Record<string, { model: string; tier: ModelTier; re
   'review': { model: 'glm-4-flash', tier: 'small', reason: '规则审核，小模型即可' },
   'story_write': { model: 'glm-4-flash', tier: 'small', reason: '创意脚本，小模型快速迭代' },
   'simple_qa': { model: 'local-rag', tier: 'local', reason: '简单问答，本地知识库直接回答' },
+  'image_analyze': { model: 'glm-4-flash', tier: 'small', reason: '图像参数提取，小模型高效' },
+  'video_analyze': { model: 'glm-4-flash', tier: 'small', reason: '视频参数分析，小模型高效' },
 
   // 深度思考场景 → 大模型
-  'intent_complex': { model: 'deepseek-reasoner', tier: 'large', reason: '多轮上下文意图识别，需要深度推理' },
-  'context_fusion': { model: 'deepseek-reasoner', tier: 'large', reason: '多任务上下文融合，需要深度思考' },
-  'competitor_analysis': { model: 'deepseek-reasoner', tier: 'large', reason: '竞品分析，需要多维推理' },
-  'orchestration': { model: 'deepseek-reasoner', tier: 'large', reason: '任务编排，需要复杂决策' },
+  'intent_complex': { model: 'deepseek-v4-pro', tier: 'large', reason: '多轮上下文意图识别，需要深度推理' },
+  'context_fusion': { model: 'deepseek-v4-pro', tier: 'large', reason: '多任务上下文融合，需要深度思考' },
+  'competitor_analysis': { model: 'deepseek-v4-pro', tier: 'large', reason: '竞品分析，需要多维推理' },
+  'orchestration': { model: 'deepseek-v4-pro', tier: 'large', reason: '任务编排，需要复杂决策' },
+  'compose_plan': { model: 'deepseek-v4-pro', tier: 'large', reason: '复合任务规划，需要深度推理' },
+  'long_video': { model: 'deepseek-v4-pro', tier: 'large', reason: '长视频分镜，需要深度创意' },
 };
+
+// ===== 调度 Agent (Supervisor)：统一决策入口 =====
+
+export interface SupervisorDecision {
+  model: string;
+  tier: ModelTier;
+  reason: string;
+  useReasoning: boolean;
+  maxTokens: number;
+  tryRagFirst: boolean;
+  scenario: string;
+}
+
+/**
+ * 调度 Agent 主函数：根据场景决定用哪个模型
+ * 
+ * 决策维度：Agent类型、用户意图、复杂度、历史上下文、是否多模态
+ * 
+ * 策略：
+ * - 简单参数提取/审核 → 小模型（快、省）
+ * - 创意生成/复杂推理/多任务融合 → 大模型（深度思考）
+ * - 多模态 → 视觉模型
+ * - 简单问答 → 本地知识库
+ */
+export function supervisorRoute(params: {
+  agentName?: string;
+  intent?: string;
+  messageLength?: number;
+  historyLength?: number;
+  hasImages?: boolean;
+  isLongVideo?: boolean;
+  isCompose?: boolean;
+}): SupervisorDecision {
+  const {
+    agentName, intent,
+    messageLength = 0, historyLength = 0,
+    hasImages = false, isLongVideo = false, isCompose = false,
+  } = params;
+
+  // 视觉任务 → 视觉模型
+  if (hasImages) {
+    return { model: 'glm-4v-flash', tier: 'vision', reason: '包含图片，需要视觉理解', useReasoning: false, maxTokens: 500, tryRagFirst: false, scenario: 'vision' };
+  }
+
+  // 复合任务 → 大模型规划
+  if (isCompose) {
+    return { model: 'deepseek-v4-pro', tier: 'large', reason: '复合任务需要深度规划', useReasoning: true, maxTokens: 2000, tryRagFirst: false, scenario: 'compose_plan' };
+  }
+
+  // 长视频 → 大模型创意
+  if (isLongVideo) {
+    return { model: 'deepseek-v4-pro', tier: 'large', reason: '长视频需要深度分镜创意', useReasoning: true, maxTokens: 3000, tryRagFirst: false, scenario: 'long_video' };
+  }
+
+  // 多轮上下文 → 大模型
+  if (historyLength > 5 && (messageLength > 200 || intent === 'compose')) {
+    return { model: 'deepseek-v4-pro', tier: 'large', reason: '多轮上下文融合需要深度推理', useReasoning: true, maxTokens: 2000, tryRagFirst: false, scenario: 'context_fusion' };
+  }
+
+  // 按 Agent 类型决策
+  if (agentName) {
+    if (agentName === 'storyWriter') {
+      if (messageLength > 300 || intent === 'video') {
+        return { model: 'deepseek-v4-pro', tier: 'large', reason: '复杂脚本需要深度创意', useReasoning: true, maxTokens: 3000, tryRagFirst: false, scenario: 'story_write_complex' };
+      }
+      return { model: 'glm-4-flash', tier: 'small', reason: '创意脚本，小模型快速迭代', useReasoning: false, maxTokens: 1500, tryRagFirst: false, scenario: 'story_write' };
+    }
+    if (agentName === 'videoMaker') {
+      return { model: 'glm-4-flash', tier: 'small', reason: '视频参数分析，小模型高效', useReasoning: false, maxTokens: 1000, tryRagFirst: false, scenario: 'video_analyze' };
+    }
+    if (agentName === 'imageCreator') {
+      return { model: 'glm-4-flash', tier: 'small', reason: '图像参数提取，小模型高效', useReasoning: false, maxTokens: 800, tryRagFirst: false, scenario: 'image_analyze' };
+    }
+  }
+
+  // 简单消息 → RAG 本地
+  if (messageLength < 50 && historyLength < 3) {
+    return { model: 'local-rag', tier: 'local', reason: '简单消息，优先本地知识库', useReasoning: false, maxTokens: 200, tryRagFirst: true, scenario: 'simple_qa' };
+  }
+
+  // 默认：小模型
+  return { model: 'glm-4-flash', tier: 'small', reason: '默认小模型高效响应', useReasoning: false, maxTokens: 1000, tryRagFirst: false, scenario: 'param_extract' };
+}

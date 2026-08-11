@@ -2,25 +2,7 @@ version: '3.8'
 
 services:
   # ============================================
-  # 1. Nginx 前端 + API 反向代理
-  # ============================================
-  nginx:
-    image: nginx:alpine
-    container_name: ai-studio-nginx
-    restart: always
-    ports:
-      - "80:80"
-    volumes:
-      - ./dist:/usr/share/nginx/html:ro          # 前端静态文件
-      - ./api/public:/usr/share/nginx/public:ro  # API 静态资源（图片/视频/上传）
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro    # Nginx 配置
-    depends_on:
-      - backend
-    networks:
-      - app-network
-
-  # ============================================
-  # 2. Express 后端 API（Node.js）
+  # 1. Express 后端 API（Node.js）
   # ============================================
   backend:
     build:
@@ -34,31 +16,37 @@ services:
       - .env
     volumes:
       - ./api/data:/app/api/data         # 持久化 JSON 数据
-      - ./api/public:/app/api/public     # 静态资源共享
+      - ./api/public:/app/api/public     # 静态资源（图片/视频）
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================
+  # 2. Nginx 前端 + API 反向代理
+  # ============================================
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: ai-studio-frontend
+    restart: always
+    ports:
+      - "80:80"
+    volumes:
+      - ./api/public:/usr/share/nginx/public:ro  # 共享静态资源
     depends_on:
-      redis:
+      backend:
         condition: service_started
     networks:
       - app-network
 
   # ============================================
-  # 3. Redis 缓存 + 会话存储
-  # ============================================
-  redis:
-    image: redis:7-alpine
-    container_name: ai-studio-redis
-    restart: always
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
-    command: redis-server /usr/local/etc/redis/redis.conf
-    networks:
-      - app-network
-
-  # ============================================
-  # 4. Python LTX 视频微服务（可选，需 GPU）
+  # 3. Python LTX 视频微服务（可选，需 GPU）
+  # 启动方式: docker compose --profile gpu up -d
   # ============================================
   ltx-server:
     build:
@@ -91,5 +79,4 @@ networks:
     driver: bridge
 
 volumes:
-  redis_data:
   ltx_outputs:

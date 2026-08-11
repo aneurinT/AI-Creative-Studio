@@ -7,8 +7,10 @@ WORKDIR /app
 RUN apk add --no-cache ffmpeg
 
 # 复制 package 文件
-COPY package.json pnpm-lock.yaml ./
-RUN npm install -g pnpm && pnpm install --prod
+COPY package.json package-lock.json* ./
+
+# 安装依赖（优先用 package-lock.json，没有则生成）
+RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
 
 # 复制源码
 COPY api/ ./api/

@@ -1,0 +1,15 @@
+node_modules
+dist
+dist-electron
+release-new
+.git
+.gitignore
+*.md
+!.env.example
+api/public/images/*.mp4
+api/public/images/*.png
+api/data/sessions/*.json
+api/data/tasks.json
+api/data/temp_videos/*
+.DS_Store
+Thumbs.db
