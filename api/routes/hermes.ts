@@ -98,12 +98,22 @@ async function tryCallReasoningLLM(
 ### 第2步：意图分类
 分析用户属于以下哪种意图：
 - **image**：生成图片/插画/海报/壁纸/头像
-- **video**：生成视频/短片/动画/广告片/宣传片
+- **video**：生成视频/短片/动画/广告片/宣传片。**重要：如果用户要求的时长超过18秒（如"30秒"、"1分钟"、"长视频"），action 仍为 video，但 duration 参数要真实反映用户要求，并在 params 中设置 split: true**
+- **compose**：用户要求同时生成图片和视频，比如"做一个花瓶的广告，要有图片和视频"、"生成海报和宣传片"、"图片视频都要"。当用户明确要求多产出物时使用此意图
 - **modify-image**：修改已有图片（必须在第0步确认了关联的图片）
 - **modify-video**：修改已有视频（必须在第0步确认了关联的视频）
 - **remove-bg**：抠图/去背景
-- **compose**：图片合成/拼接
+- **compose-image**：图片合成/拼接
 - **general**：闲聊/问答/非创作类问题
+
+**compose 意图特殊规则：**
+- 用户说"广告"、"推广"、"营销"、"宣传"时，如果涉及具体产品，通常是 compose（图片+视频）
+- compose 的 params 需包含：prompt（通用提示词）、style、duration、composeType: "image+video"
+- 用户上传了图片并要求"生成宣传视频"时，action 为 video（不需要 compose，因为已有参考图）
+
+**长视频拆分规则（重要）：**
+- 当 duration > 18 秒时，在 params 中设置 split: true
+- 在 response 中提示用户："🎬 检测到长视频需求（{duration}秒），将自动拆分为多段生成并拼接，请耐心等待..."
 
 ### 第3步：参数推理
 根据用户描述和上下文关联推理出具体参数：
@@ -172,10 +182,9 @@ async function tryCallReasoningLLM(
 
     const parsed = JSON.parse(jsonMatch[0]);
     const action = (parsed.action || '').toLowerCase();
-    const validActions = ['image', 'video', 'modify-image', 'modify-video', 'remove-bg', 'compose', 'general'];
+    const validActions = ['image', 'video', 'modify-image', 'modify-video', 'remove-bg', 'compose', 'compose-image', 'general'];
     const mappedAction = validActions.find(a => action.includes(a)) || 'general';
     const params = parsed.params || {};
-
     // 基于推理结果自动生成有实质内容的分析总结
     const analysisSummary = buildAnalysisSummary(mappedAction, params, reasoning);
 
@@ -250,8 +259,9 @@ params: prompt, style, size(默认1024x1024), contextFromPrevious(如有)
 style: 广告/宣传 → cinematic | 动漫/卡通 → anime | 写实 → realistic
 params: prompt, style, duration, contextFromPrevious(如有)
 
-### modify-image / modify-video / remove-bg / compose / general
+### modify-image / modify-video / remove-bg / compose-image / compose / general
 修改类意图必须在 params 中带上 contextFromPrevious
+compose 代表同时生成图片+视频（并行任务），compose-image 代表图片合成
 
 ## 输出格式（严格JSON，不要其他文字）
 {"action":"video","params":{"prompt":"提示词","style":"realistic","duration":10,"contextFromPrevious":"上一轮生成了...猫"},"response":"基于上一轮的猫，现在生成..."}
@@ -296,10 +306,9 @@ params: prompt, style, duration, contextFromPrevious(如有)
 
     const parsed = JSON.parse(jsonMatch[0]);
     const action = (parsed.action || '').toLowerCase();
-    const validActions = ['image', 'video', 'modify-image', 'modify-video', 'remove-bg', 'compose', 'general'];
+    const validActions = ['image', 'video', 'modify-image', 'modify-video', 'remove-bg', 'compose', 'compose-image', 'general'];
     const mappedAction = validActions.find(a => action.includes(a)) || 'general';
     const params = parsed.params || {};
-
     console.log(`[${provider}] Intent: ${mappedAction} | ${parsed.response?.substring(0, 50)}`);
 
     return {
@@ -373,8 +382,11 @@ function buildAnalysisSummary(action: string, params: Record<string, any>, reaso
     case 'remove-bg': {
       return `🖼️ **分析结果：智能抠图**\n- 意图识别：用户想要去除图片背景\n\n接下来将自动抠除背景，生成透明背景图片。`;
     }
-    case 'compose': {
+    case 'compose-image': {
       return `🎭 **分析结果：图片合成**\n- 意图识别：用户想要合成/拼接图片\n\n接下来将提取主体并合成到新背景中。`;
+    }
+    case 'compose': {
+      return `🎬🎨 **分析结果：复合创作（图片+视频）**\n- 意图识别：用户需要同时生成图片和视频\n\n接下来将并行执行图片和视频生成任务。`;
     }
     case 'general': {
       // 通用问答：如果 reasoning 存在，提取关键信息
@@ -483,7 +495,9 @@ function fallbackAnalyze(message: string): { action: string; params: Record<stri
   } else if (lowerText.includes('抠图') || lowerText.includes('去背景') || lowerText.includes('移除背景')) {
     action = 'remove-bg';
   } else if (lowerText.includes('合成') || lowerText.includes('组合') || lowerText.includes('叠加')) {
-    action = 'compose';
+    action = 'compose-image';
+  } else if ((lowerText.includes('广告') || lowerText.includes('宣传') || lowerText.includes('推广')) && (lowerText.includes('图片') || lowerText.includes('视频'))) {
+    action = 'compose'; // 并行图片+视频
   }
 
   return {
@@ -879,11 +893,18 @@ router.post('/chat-with-image', async (req: Request, res: Response): Promise<voi
       ? `📸 已分析 ${urls.length} 张图片：${visionResult.description || ''}`
       : `📸 已分析你的图片：${visionResult.description || ''}`;
 
+    // 将参考图片 URL 注入 params，供后续 video/image 生成使用
+    const params = {
+      ...(visionResult.params || fallbackAnalyze(message).params),
+      referenceImages: urls, // 参考图片列表
+      referenceImage: primaryImage, // 主参考图
+    };
+
     res.json({
       success: true,
       response: `${multiDesc}\n\n根据你的指令和图片，我准备帮你创作。`,
       action: visionResult.action || fallbackAnalyze(message).action,
-      params: visionResult.params || fallbackAnalyze(message).params,
+      params,
     });
   } catch (error) {
     console.error('[Hermes+Vision] Error:', error);

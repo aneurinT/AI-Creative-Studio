@@ -6,6 +6,7 @@ import ffmpegPath from '@ffmpeg-installer/ffmpeg';
 import { generateVideo } from './imageService.js';
 import { addToVideoHistory } from './videoHistoryService.js';
 import { fetchWithTimeout, fetchJSON } from './fetchUtils.js';
+import { reviewVideoFinal } from './videoReviewAgent.js';
 
 ffmpeg.setFfmpegPath(ffmpegPath.path);
 
@@ -19,6 +20,8 @@ export interface SplitVideoResult {
   videoUrl?: string;
   error?: string;
   progress?: number;
+  reviewScore?: number;
+  reviewPassed?: boolean;
 }
 
 interface SceneScript {
@@ -543,6 +546,24 @@ export async function generateSplitVideo(
     const statusLabel = skippedCount > 0 
       ? `${tempSegmentPaths.length}/${scenes.length}段 × 18s (${skippedCount}段跳过)` 
       : `${scenes.length}段 × 18s ≈ ${totalSecs}秒`;
+
+    // Step 4: 拼接后审核 Agent 终审
+    onProgress?.(95, '🔍 审核 Agent 正在检查拼接质量...');
+    console.log(`[SplitVideo] Reviewing merged video: ${finalUrl}`);
+    
+    const serverPort = process.env.PORT || '3001';
+    const videoFullUrl = `http://localhost:${serverPort}${finalUrl}`;
+    const reviewResult = await reviewVideoFinal(
+      prompt, style || '', String(duration), videoFullUrl
+    );
+
+    if (reviewResult.passed) {
+      console.log(`[SplitVideo] Review passed: ${reviewResult.reason}`);
+      onProgress?.(98, `✅ 审核通过: ${reviewResult.reason || '质量合格'}`);
+    } else {
+      console.warn(`[SplitVideo] Review warning: ${reviewResult.reason} (score: ${reviewResult.score})`);
+      onProgress?.(98, `⚠️ 审核提示: ${reviewResult.reason || '部分片段可能不完美'}`);
+    }
     
     addToVideoHistory({
       prompt,
@@ -552,12 +573,18 @@ export async function generateSplitVideo(
     });
 
     const doneMsg = skippedCount > 0
-      ? `视频制作完成！(${tempSegmentPaths.length}/${scenes.length} 段成功，${skippedCount} 段因限流跳过)`
-      : '视频制作完成！';
+      ? `视频制作完成！(${tempSegmentPaths.length}/${scenes.length} 段成功，${skippedCount} 段因限流跳过)${reviewResult.passed ? ' ✅' : ' ⚠️'}`
+      : `视频制作完成！审核${reviewResult.passed ? '通过' : '完成'} ✅`;
     onProgress?.(100, doneMsg);
-    console.log(`[SplitVideo] Complete: ${finalUrl} (${tempSegmentPaths.length}/${scenes.length} segments)`);
+    console.log(`[SplitVideo] Complete: ${finalUrl} (${tempSegmentPaths.length}/${scenes.length} segments, review: ${reviewResult.passed ? 'passed' : 'warning'})`);
 
-    return { success: true, videoUrl: finalUrl, progress: 100 };
+    return { 
+      success: true, 
+      videoUrl: finalUrl, 
+      progress: 100,
+      reviewScore: reviewResult.score,
+      reviewPassed: reviewResult.passed,
+    };
 
   } catch (error) {
     console.error('[SplitVideo] Error:', error);

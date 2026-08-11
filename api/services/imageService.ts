@@ -792,12 +792,21 @@ export async function analyzeImageWithText(request: {
               { type: 'image_url', image_url: { url: `data:image/${mime};base64,${imageBase64}` } },
               {
                 type: 'text',
-                text: `用户上传了一张图片并发送了以下指令："${message}"。请结合图片内容理解用户的创作需求，返回JSON格式（只返回JSON，不要其他文字）：
+                text: `用户上传了一张图片并发送了以下指令："${message}"。请结合图片内容理解用户的创作需求。
+
+重要规则：
+- 如果用户说"生成视频"、"宣传片"、"广告片"、"短片"等，action 为 "video"
+- 如果用户说"生成图片"、"海报"、"壁纸"、"插画"等，action 为 "image"  
+- 如果用户说"广告"、"宣传"同时要图片和视频，action 为 "compose"
+- 如果用户说"用这个图片做视频"，把图片内容融入 prompt 描述
+- prompt 必须包含图片中的主体特征（物体、颜色、场景等）
+
+返回JSON格式（只返回JSON，不要其他文字）：
 {
   "description": "图片的视觉描述(50-100字)",
   "intent": "用户的创作意图推断",
-  "action": "image/video/modify-image/modify-video/general",
-  "prompt": "最终用于生成的详细提示词(中文,100-200字)",
+  "action": "image/video/compose/modify-image/modify-video/general",
+  "prompt": "最终用于生成的详细提示词(中文,100-200字)，包含图片主体描述",
   "style": "realistic/cinematic/anime/3d/illustration",
   "analysis": "综合分析"
 }`,

@@ -118,13 +118,15 @@ router.delete('/history', (req: Request, res: Response) => {
 })
 
 router.get('/pending', (req: Request, res: Response) => {
-  const result = getPendingTasks()
+  const userId = (req as any).user?.userId
+  const result = getPendingTasks(userId)
   res.json(result)
 })
 
 router.delete('/pending/:taskId', (req: Request, res: Response) => {
   const { taskId } = req.params
-  const result = removePendingTask(taskId)
+  const userId = (req as any).user?.userId
+  const result = removePendingTask(taskId, userId)
   // 同时标记任务为 cancelled，让后台轮询可以检测到并停止
   updateTaskProgress(taskId, { status: 'cancelled', error: '用户已取消任务' })
   res.json(result)
@@ -374,6 +376,7 @@ export async function createVideoTaskAsync(
   style: string,
   duration: string,
   split: boolean = true,
+  userId?: string,
 ): Promise<VideoTaskResult> {
   const apiKey = process.env.AGNES_VIDEO_API_KEY
 
@@ -399,6 +402,7 @@ export async function createVideoTaskAsync(
     const taskId = `split_${Date.now()}`
     addPendingTask({
       taskId,
+      userId,
       prompt,
       style: style || '',
       duration: duration || '10',
@@ -432,7 +436,7 @@ export async function createVideoTaskAsync(
           addToVideoHistory({
             prompt,
             style: style || '',
-            duration: `${Math.ceil(targetDuration / 18)}段 × 18秒`,
+            duration: `${Math.ceil(targetDuration / 18)}段 × 18秒${result.reviewPassed !== undefined ? (result.reviewPassed ? ' ✅' : ' ⚠️') : ''}`,
             videoUrl: result.videoUrl,
           })
         } else {
@@ -567,6 +571,7 @@ export async function createVideoTaskAsync(
 
   addPendingTask({
     taskId: videoId,
+    userId,
     prompt,
     style: style || '',
     duration: duration || '10',
@@ -1262,7 +1267,7 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
 
     console.log(`Video generate request: prompt=${prompt}, style=${style}, duration=${duration}, split=${split}`)
 
-    const result = await createVideoTaskAsync(prompt, style || '', duration || '10', split)
+    const result = await createVideoTaskAsync(prompt, style || '', duration || '10', split, (req as any).user?.userId)
     res.json(result)
   } catch (error) {
     console.error('Video route error:', error)
@@ -1329,7 +1334,7 @@ router.post('/modify', async (req: Request, res: Response): Promise<void> => {
 
     // 异步创建视频任务（与 /api/video/ 一致），立即返回 taskId 供前端轮询
     // 避免同步等待视频生成导致 HTTP 请求超时返回空响应
-    const result = await createVideoTaskAsync(newPrompt, style || '', duration || '10', true)
+    const result = await createVideoTaskAsync(newPrompt, style || '', duration || '10', true, (req as any).user?.userId)
     res.json({ ...result, newPrompt })
   } catch (error) {
     console.error('Video modify route error:', error)

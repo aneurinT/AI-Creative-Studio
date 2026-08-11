@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 
 export interface VideoTask {
   taskId: string;
+  userId?: string;        // 创建任务的用户 ID，用于隔离
   prompt: string;
   style: string;
   duration: string;
@@ -37,13 +38,17 @@ function ensureTasksFile(): void {
   }
 }
 
-export function getPendingTasks(): PendingTasksResponse {
+export function getPendingTasks(userId?: string): PendingTasksResponse {
   ensureTasksFile();
 
   try {
     const data = fs.readFileSync(tasksFilePath, 'utf-8');
     const tasks = JSON.parse(data) as VideoTask[];
-    const pendingOnly = tasks.filter(t => !t.status || t.status === 'pending');
+    let pendingOnly = tasks.filter(t => !t.status || t.status === 'pending');
+    // 如果有 userId，只返回该用户的任务
+    if (userId) {
+      pendingOnly = pendingOnly.filter(t => !t.userId || t.userId === userId);
+    }
     pendingOnly.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     return { success: true, tasks: pendingOnly };
   } catch (error) {
@@ -70,14 +75,19 @@ export function addPendingTask(task: Omit<VideoTask, 'createdAt'>): void {
   }
 }
 
-export function removePendingTask(taskId: string): TaskOperationResponse {
+export function removePendingTask(taskId: string, userId?: string): TaskOperationResponse {
   ensureTasksFile();
 
   try {
     const data = fs.readFileSync(tasksFilePath, 'utf-8');
     const tasks = JSON.parse(data) as VideoTask[];
 
-    const filtered = tasks.filter((t) => t.taskId !== taskId);
+    const filtered = tasks.filter((t) => {
+      if (t.taskId !== taskId) return true; // 保留不匹配的
+      // 如果提供了 userId，只删除该用户的任务
+      if (userId && t.userId && t.userId !== userId) return true;
+      return false;
+    });
 
     fs.writeFileSync(tasksFilePath, JSON.stringify(filtered, null, 2));
 

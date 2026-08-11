@@ -23,7 +23,7 @@ interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
-  actionType?: 'image' | 'video' | 'remove-bg' | 'compose' | 'modify-video' | 'modify-image' | 'general';
+  actionType?: 'image' | 'video' | 'remove-bg' | 'compose' | 'compose-image' | 'modify-video' | 'modify-image' | 'general';
   params?: Record<string, any>;
   timestamp: number;
   generatedImage?: string;
@@ -437,6 +437,8 @@ export default function AIAssistant() {
     setCurrentSession(session);
     setMessages(session.messages);
     setExpandedThoughts(new Set());
+    // 切换会话时清空消息队列，防止消息发错会话
+    setMessageQueue([]);
   }
 
   // 当 ChatHistory 中删除会话后回调：刷新列表，若当前会话被删或无会话则自动新建
@@ -620,8 +622,10 @@ export default function AIAssistant() {
         return `好的，我来调整这张图片。让我理解你的修改需求——`;
       case 'remove-bg':
         return `没问题，我来帮你抠掉这张图片的背景，保留主体部分——`;
-      case 'compose':
+      case 'compose-image':
         return `好的，我来帮你合成这些素材——`;
+      case 'compose':
+        return `好的，我将同步为你生成图片和视频——`;
       default:
         return rawResponse || '让我分析一下你的需求，然后帮你处理——';
     }
@@ -672,6 +676,8 @@ export default function AIAssistant() {
     } else if (lowerText.includes('抠图') || lowerText.includes('去背景') || lowerText.includes('移除背景')) {
       action = 'remove-bg';
     } else if (lowerText.includes('合成') || lowerText.includes('组合') || lowerText.includes('叠加')) {
+      action = 'compose-image';
+    } else if ((lowerText.includes('广告') || lowerText.includes('宣传') || lowerText.includes('推广')) && (lowerText.includes('图片') || lowerText.includes('视频'))) {
       action = 'compose';
     }
 
@@ -1391,6 +1397,7 @@ export default function AIAssistant() {
             style: params.style || 'realistic',
             duration: params.duration || '10',
             sceneBreakdown: params.sceneBreakdown || undefined, // 传递分镜数据
+            referenceImage: params.referenceImage || undefined, // 多模态：参考图片
           }),
           signal: controller.signal,
         });
@@ -1829,9 +1836,22 @@ export default function AIAssistant() {
 
           if (data.progress !== undefined) {
             const statusText = data.status || '';
-            let displayText = isSplitVideo
-              ? `📹 视频生成中... ${data.progress}% ${statusText}`
-              : `📹 视频生成中... ${data.progress}%`;
+            let displayText: string;
+            if (isSplitVideo) {
+              // 拆分任务：显示分阶段进度
+              const progress = data.progress || 0;
+              if (progress < 10) {
+                displayText = `🎬 正在创作分镜脚本... ${progress}%`;
+              } else if (progress < 90) {
+                displayText = `📹 ${statusText} [${progress}%]`;
+              } else if (progress < 98) {
+                displayText = `🎞️ 正在拼接视频片段... ${progress}%`;
+              } else {
+                displayText = `🔍 审核 Agent 正在检查质量... ${progress}%`;
+              }
+            } else {
+              displayText = `📹 视频生成中... ${data.progress}%`;
+            }
             setMessages(prev => prev.map(m => {
               if (m.id === loadingId) {
                 return {
@@ -2264,6 +2284,20 @@ export default function AIAssistant() {
       setMessages(prev => [...prev, assistantMessage]);
 
       switch (actionResult.action) {
+        case 'compose': {
+          // 并行任务：同时生成图片和视频
+          console.log('[Compose] 并行执行图片+视频任务');
+          
+          // 图片生成任务（不阻塞视频流程）
+          generateImageAction({
+            prompt: actionResult.params?.prompt || sendText,
+            style: actionResult.params?.style,
+          }).catch(err => {
+            console.error('[Compose] Image generation failed:', err);
+          });
+          
+          // fall-through 到 video 流程（不走 break）
+        }
         case 'video': {
           const loadingId = `loading-${Date.now()}`;
           setMessages(prev => [...prev, {
@@ -2509,7 +2543,7 @@ export default function AIAssistant() {
           await generateImageAction(actionResult.params);
           break;
         }
-        case 'compose': {
+        case 'compose-image': {
           await generateImageAction(actionResult.params);
           break;
         }
