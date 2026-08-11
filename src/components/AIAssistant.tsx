@@ -399,6 +399,14 @@ export default function AIAssistant() {
           body: JSON.stringify({ messages: defaultMessages }),
         });
 
+        // 新建会话时清理所有附件和输入状态，确保每个对话独立
+        setPendingAttachmentImages([]);
+        setShowImageUrlInput(false);
+        setMessageQueue([]);
+        setInput('');
+        setExpandedThoughts(new Set());
+        setVideoContext(null);
+        setImageContext(null);
         setCurrentSession({ ...data.session, messages: defaultMessages });
         setMessages(defaultMessages);
         // 递增版本号，通知 ChatHistory 重新加载会话列表
@@ -442,8 +450,13 @@ export default function AIAssistant() {
     setCurrentSession(session);
     setMessages(session.messages);
     setExpandedThoughts(new Set());
-    // 切换会话时清空消息队列，防止消息发错会话
+    // 切换会话时清空附件和输入状态，确保每个对话独立
+    setPendingAttachmentImages([]);
+    setShowImageUrlInput(false);
     setMessageQueue([]);
+    setInput('');
+    setVideoContext(null);
+    setImageContext(null);
   }
 
   // 当 ChatHistory 中删除会话后回调：刷新列表，若当前会话被删或无会话则自动新建
@@ -1645,6 +1658,8 @@ export default function AIAssistant() {
               }
               return m;
             }));
+            // 视频任务完成后，自动消费队列中的下一个任务
+            processNextInQueue();
             return;
           }
 
@@ -3342,7 +3357,7 @@ export default function AIAssistant() {
                   ? 'bg-orange-50 focus:ring-orange-400 text-gray-400'
                   : 'bg-gray-100 focus:ring-purple-500'
               }`}
-              disabled={isTyping || abortCooldown > 0}
+              disabled={abortCooldown > 0}
             />
             {abortCooldown > 0 && (
               <div className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-medium text-orange-500">
@@ -3352,9 +3367,9 @@ export default function AIAssistant() {
           </div>
           <button
             onClick={handleSend}
-            disabled={!input.trim() || isTyping || abortCooldown > 0}
+            disabled={!input.trim() || abortCooldown > 0}
             className={`p-2.5 rounded-full transition-all duration-200 ${
-              input.trim() && !isTyping && abortCooldown === 0
+              input.trim() && abortCooldown === 0
                 ? 'bg-purple-600 text-white hover:bg-purple-700 hover:scale-105 active:scale-95 animate-glow'
                 : 'bg-gray-200 text-gray-400 cursor-not-allowed'
             }`}
