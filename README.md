@@ -283,7 +283,7 @@ aiProject/
 │       ├── app.db                # SQLite 数据库（DB_MODE=sqlite）
 │       └── logs/                 # 操作日志（按日分文件）
 ├── src/                          # 前端代码
-│   ├── App.tsx                   # 路由配置（12 个路由）
+│   ├── App.tsx                   # 路由配置（11 个路由）
 │   ├── main.tsx                  # 入口
 │   ├── components/               # 公共组件
 │   │   ├── AIAssistant.tsx       # AI 助手主组件（3000+ 行）
@@ -293,10 +293,9 @@ aiProject/
 │   │   ├── Empty.tsx             # 空状态占位
 │   │   ├── ImageUploader.tsx     # 图片上传（拖拽 + 图生视频）
 │   │   └── ModelSelector.tsx     # 模型选择器
-│   ├── pages/                    # 页面组件（12 个）
+│   ├── pages/                    # 页面组件（11 个）
 │   │   ├── AssistantPage.tsx     # AI 助手页（多 Agent 协作主入口）
 │   │   ├── Home.tsx              # 一键生图
-│   │   ├── NewHome.tsx           # 新版首页（开发中）
 │   │   ├── VideoGenerator.tsx    # 视频生成
 │   │   ├── VideoEditor.tsx       # AI 视频剪辑
 │   │   ├── RemoveBg.tsx          # 智能抠图
@@ -743,8 +742,8 @@ XIAOHONGSHU_CLIENT_KEY=your_xhs_key           # 小红书开放平台
 
 | 指标 | 数据 |
 |------|------|
-| **前端路由** | 12 个 |
-| **页面文件** | 12 个 |
+| **前端路由** | 11 个 |
+| **页面文件** | 11 个 |
 | **前端组件** | 7 个 |
 | **API 端点** | 100+ 个 |
 | **路由文件** | 22 个 |

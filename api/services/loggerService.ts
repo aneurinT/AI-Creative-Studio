@@ -7,8 +7,10 @@ const __dirname = path.dirname(__filename);
 
 // 日志目录
 const LOGS_DIR = path.join(__dirname, '../logs');
-const MAX_LOG_FILES = 30; // 最多保留 30 个日志文件
-const MAX_LOG_SIZE_MB = 50; // 单个日志文件最大 50MB
+const MAX_LOG_FILES = parseInt(process.env.LOG_MAX_FILES || '30', 10); // 最多保留日志文件数
+const MAX_LOG_SIZE_MB = parseInt(process.env.LOG_MAX_SIZE_MB || '50', 10); // 单个日志文件最大 MB
+const MAX_ROTATIONS_PER_DAY = parseInt(process.env.LOG_MAX_ROTATIONS || '5', 10); // 每天最多轮转文件数
+const CLEAN_INTERVAL_MS = 60 * 60 * 1000; // 清理检查间隔：1 小时
 
 // ===== 日志级别 =====
 type LogLevel = 'INFO' | 'WARN' | 'ERROR' | 'SUCCESS' | 'DEBUG';
@@ -42,27 +44,50 @@ function ensureLogDir(): void {
   }
 }
 
-// 清理过期日志文件
-function cleanOldLogs(): void {
+// 清理节流：避免每次写日志都执行目录扫描（性能优化）
+let lastCleanTime = 0;
+
+// 清理过期日志文件（节流：每小时最多执行一次，force=true 跳过节流）
+function cleanOldLogs(force = false): void {
+  const now = Date.now();
+  if (!force && now - lastCleanTime < CLEAN_INTERVAL_MS) return;
+  lastCleanTime = now;
+
   try {
-    const files = fs.readdirSync(LOGS_DIR)
+    const allFiles = fs.readdirSync(LOGS_DIR)
       .filter(f => f.startsWith('operations-') && f.endsWith('.log'))
-      .map(f => ({ name: f, path: path.join(LOGS_DIR, f), mtime: fs.statSync(path.join(LOGS_DIR, f)).mtime }))
+      .map(f => {
+        const filePath = path.join(LOGS_DIR, f);
+        return { name: f, path: filePath, mtime: fs.statSync(filePath).mtime };
+      })
       .sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
 
-    // 超过数量限制的删除
-    if (files.length > MAX_LOG_FILES) {
-      files.slice(MAX_LOG_FILES).forEach(f => {
-        fs.unlinkSync(f.path);
+    // 1. 超过总数限制的删除（最旧的先删）
+    if (allFiles.length > MAX_LOG_FILES) {
+      allFiles.slice(MAX_LOG_FILES).forEach(f => {
+        try { fs.unlinkSync(f.path); } catch { /* 文件可能已被删除 */ }
       });
     }
 
-    // 检查当前日志文件大小
+    // 2. 限制每天的轮转文件数量（operations-DATE-TIMESTAMP.log）
+    const todayStr = (() => {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    })();
+    const todayRotations = allFiles
+      .filter(f => f.name.startsWith(`operations-${todayStr}-`))
+      .sort((a, b) => a.mtime.getTime() - b.mtime.getTime()); // 最旧的在前
+    if (todayRotations.length > MAX_ROTATIONS_PER_DAY) {
+      todayRotations.slice(0, todayRotations.length - MAX_ROTATIONS_PER_DAY).forEach(f => {
+        try { fs.unlinkSync(f.path); } catch { /* 忽略 */ }
+      });
+    }
+
+    // 3. 检查当前日志文件大小，超限则轮转
     const todayPath = getTodayLogPath();
     if (fs.existsSync(todayPath)) {
       const stats = fs.statSync(todayPath);
       if (stats.size > MAX_LOG_SIZE_MB * 1024 * 1024) {
-        // 重命名旧文件
         const backupPath = todayPath.replace('.log', `-${Date.now()}.log`);
         fs.renameSync(todayPath, backupPath);
       }
@@ -247,9 +272,10 @@ export function getRecentLogs(lines: number = 100): string {
   }
 }
 
-// 启动时记录
+// 启动时强制清理一次过期日志 + 记录初始化
+cleanOldLogs(true);
 logSystemEvent({
   operation: 'LoggerService',
-  detail: '日志服务初始化完成',
+  detail: `日志服务初始化完成（轮转策略: 最多${MAX_LOG_FILES}文件 / 单文件${MAX_LOG_SIZE_MB}MB / 每日${MAX_ROTATIONS_PER_DAY}轮转）`,
   level: 'INFO',
 });

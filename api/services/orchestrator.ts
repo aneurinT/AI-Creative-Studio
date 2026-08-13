@@ -13,6 +13,7 @@ import { recall, remember } from './agentMemory.js';
 import { addOperationLog } from './database.js';
 import { startSpan, endSpan, createTrace, finishTrace, setSpanRetryCount } from './tracing.js';
 import type { ActiveSpan } from './tracing.js';
+import { recordExperience, suggestOptimalAgent, suggestOptimalParams, queryExperience } from './globalExperiencePool.js';
 
 // ===== 类型定义 =====
 
@@ -94,6 +95,17 @@ export async function analyzeParallelism(
     ? startSpan(traceId, context.parentSpanId || null, 'orchestrator', 'analyzeParallelism', { userMessage: userMessage.substring(0, 200) })
     : null;
 
+  // 查询相关历史经验，用于辅助任务分析
+  const relevantExperiences = queryExperience({ message: userMessage });
+  const experienceHint = relevantExperiences.length > 0
+    ? `\n\n【历史经验参考】\n${relevantExperiences.map(e =>
+      `- ${e.agentName}/${e.action}: 成功率${(e.successRate * 100).toFixed(0)}%, 平均耗时${e.durationMs}ms, 命中${e.hitCount}次`
+    ).join('\n')}`
+    : '';
+  if (experienceHint) {
+    console.log(`[Orchestrator] 查询到 ${relevantExperiences.length} 条相关历史经验`);
+  }
+
   const apiKey = getChatApiKey();
   if (!apiKey) {
     // 无 LLM 时：单任务顺序执行
@@ -120,7 +132,7 @@ export async function analyzeParallelism(
         model: CHAT_MODEL,
         messages: [
           { role: 'system', content: PARALLEL_ANALYSIS_PROMPT },
-          { role: 'user', content: `${contextSummary}\n\n用户请求：${userMessage}` },
+          { role: 'user', content: `${contextSummary}${experienceHint}\n\n用户请求：${userMessage}` },
         ],
         temperature: 0.3,
         max_tokens: 500,
@@ -250,13 +262,26 @@ export async function executeWithRetry(
       task.result = result;
       task.endTime = Date.now();
 
+      const duration = task.endTime - task.startTime!;
       addOperationLog({
         level: 'INFO', category: 'agent-orchestration',
         session_id: context.sessionId,
         operation: `[${task.agentName}] ${task.action}`,
-        detail: `成功${attempt > 0 ? `(重试${attempt}次后)` : ''} | 耗时${task.endTime - task.startTime!}ms`,
-        duration_ms: task.endTime - task.startTime!,
+        detail: `成功${attempt > 0 ? `(重试${attempt}次后)` : ''} | 耗时${duration}ms`,
+        duration_ms: duration,
         result: 'success',
+      });
+
+      // 收集成功经验到全局经验池
+      recordExperience({
+        message: context.userMessage,
+        agentName: task.agentName,
+        action: task.action,
+        params: task.params,
+        status: 'success',
+        durationMs: duration,
+        retryCount: attempt,
+        resultSummary: typeof result === 'string' ? result.substring(0, 200) : JSON.stringify(result).substring(0, 200),
       });
 
       if (span) endSpan(span, 'success', result);
@@ -292,6 +317,19 @@ export async function executeWithRetry(
         detail: `已重试${attempt}次 | 错误: ${lastError.substring(0, 200)}`,
         result: 'failure', error_text: lastError,
       });
+
+      // 收集失败经验到全局经验池
+      recordExperience({
+        message: context.userMessage,
+        agentName: task.agentName,
+        action: task.action,
+        params: task.params,
+        status: 'failed',
+        durationMs: task.endTime! - task.startTime!,
+        retryCount: attempt,
+        errorMessage: lastError,
+      });
+
       break;
     }
   }
@@ -399,4 +437,68 @@ export async function executePlan(
   }
 
   return results;
+}
+
+/**
+ * 一体化编排入口：分析 + 执行
+ * 供 AI 协作者、外部 SaaS API 等调用
+ */
+export async function runOrchestration(params: {
+  userMessage: string;
+  userId?: string;
+  history?: any[];
+  imageContext?: any;
+  videoContext?: any;
+}): Promise<{
+  success: boolean;
+  durationMs: number;
+  output?: any;
+  error?: string;
+  traceId?: string;
+}> {
+  const { userMessage, userId, history, imageContext, videoContext } = params;
+  const sessionId = `session_${userId || 'anonymous'}_${Date.now()}`;
+  const startTs = Date.now();
+
+  const context: OrchestrationContext = {
+    sessionId,
+    userMessage,
+    history: history || [],
+    imageContext,
+    videoContext,
+    sharedContext: {},
+  };
+
+  try {
+    const plan = await analyzeParallelism(userMessage, context);
+
+    const results = await executePlan(plan, context, async (task, ctx) => {
+      // 默认执行器：仅做标记。实际场景由调用方注入或由 Agent 端点处理
+      return { agentName: task.agentName, action: task.action, status: 'executed', params: task.params };
+    });
+
+    const successCount = results.filter(r => r.status === 'success').length;
+    const failCount = results.filter(r => r.status === 'failed').length;
+    const lastResult = results.find(r => r.status === 'success' && r.result);
+
+    return {
+      success: failCount === 0,
+      durationMs: Date.now() - startTs,
+      output: lastResult?.result || {
+        summary: `${results.length}个任务: ${successCount}成功, ${failCount}失败`,
+        results: results.map(r => ({
+          agentName: r.agentName,
+          action: r.action,
+          status: r.status,
+          error: r.error,
+        })),
+      },
+    };
+  } catch (error) {
+    return {
+      success: false,
+      durationMs: Date.now() - startTs,
+      error: (error as Error).message,
+    };
+  }
 }

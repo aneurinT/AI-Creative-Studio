@@ -4,6 +4,10 @@ import {
   broadcastMessage, getRoomMessages, tryLock, releaseLock,
   getOnlineCount, getOnlineUsers, touchUser,
 } from '../services/collaborationService.js';
+import {
+  enableCollaborator, disableCollaborator, listCollaboratorRooms,
+  onRoomMessage,
+} from '../services/aiCollaborator.js';
 
 const router = Router();
 
@@ -57,6 +61,12 @@ router.post('/rooms/:roomId/messages', (req: Request, res: Response) => {
     roomId: req.params.roomId, userId, username: username || userId,
     content, type: type || 'user_message', sessionId,
   });
+
+  // AI 协作者监听：如果房间启用了 AI 协作者，则触发背景判断
+  try {
+    onRoomMessage(msg);
+  } catch { }
+
   res.json({ success: true, message: msg });
 });
 
@@ -87,6 +97,28 @@ router.post('/unlock', (req: Request, res: Response) => {
 /** GET /api/collaboration/rooms/:roomId/online — 在线用户数 */
 router.get('/rooms/:roomId/online', (req: Request, res: Response) => {
   res.json({ success: true, onlineCount: getOnlineCount(req.params.roomId), users: getOnlineUsers(req.params.roomId) });
+});
+
+/** POST /api/collaboration/rooms/:roomId/ai-collaborator/enable — 启用 AI 协作者 */
+router.post('/rooms/:roomId/ai-collaborator/enable', (req: Request, res: Response) => {
+  const { autoListen, allowAutoExecute, triggerWindow } = req.body || {};
+  enableCollaborator(req.params.roomId, {
+    autoListen: autoListen !== false,
+    allowAutoExecute: allowAutoExecute !== false,
+    triggerWindow: triggerWindow || 5,
+  });
+  res.json({ success: true, message: 'AI 协作者已加入房间' });
+});
+
+/** POST /api/collaboration/rooms/:roomId/ai-collaborator/disable — 禁用 AI 协作者 */
+router.post('/rooms/:roomId/ai-collaborator/disable', (req: Request, res: Response) => {
+  disableCollaborator(req.params.roomId);
+  res.json({ success: true, message: 'AI 协作者已离开房间' });
+});
+
+/** GET /api/collaboration/ai-collaborator/rooms — AI 协作者已加入的房间列表 */
+router.get('/ai-collaborator/rooms', (req: Request, res: Response) => {
+  res.json({ success: true, rooms: listCollaboratorRooms() });
 });
 
 export default router;

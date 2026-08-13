@@ -15,6 +15,27 @@ const __dirname = path.dirname(__filename)
 const JWT_SECRET = process.env.JWT_SECRET || 'ai-studio-default-secret-change-me'
 const USERS_FILE = path.join(__dirname, '../../data/users.json')
 
+// ===== 安全加固：生产环境强制鉴权 =====
+const IS_PRODUCTION = process.env.NODE_ENV === 'production'
+// 鉴权跳过仅在开发环境生效；生产环境强制鉴权，忽略 SKIP_AUTH 配置
+const SKIP_AUTH_ENABLED = !IS_PRODUCTION && process.env.SKIP_AUTH === 'true'
+
+// 启动时输出鉴权状态摘要 + 安全警告
+if (IS_PRODUCTION && process.env.SKIP_AUTH === 'true') {
+  console.error('┌───────────────────────────────────────────────────────────────────┐')
+  console.error('│ ⚠️  安全警告：生产环境检测到 SKIP_AUTH=true，已强制忽略并启用鉴权      │')
+  console.error('└───────────────────────────────────────────────────────────────────┘')
+} else if (SKIP_AUTH_ENABLED) {
+  console.warn('⚠️  [开发模式] 鉴权已跳过（SKIP_AUTH=true），切勿用于生产环境')
+} else {
+  console.log('[Auth] JWT 鉴权已启用')
+}
+if (IS_PRODUCTION && JWT_SECRET === 'ai-studio-default-secret-change-me') {
+  console.error('┌───────────────────────────────────────────────────────────────────┐')
+  console.error('│ ⚠️  安全警告：生产环境使用默认 JWT_SECRET，请通过环境变量设置随机密钥  │')
+  console.error('└───────────────────────────────────────────────────────────────────┘')
+}
+
 // 扩展 Express Request 类型
 declare global {
   namespace Express {
@@ -67,6 +88,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     '/api/video-edit/',  // AI 视频剪辑
     '/api/social/',      // 社交媒体
     '/api/office/',      // 办公工具
+    '/api/external/',    // SaaS 对外开放 API（使用独立 X-API-Key 鉴权）
   ]
 
   if (publicPaths.some(p => req.path.startsWith(p))) {
@@ -74,8 +96,8 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     return
   }
 
-  // 开发环境可选跳过鉴权（方便调试）
-  if (process.env.NODE_ENV === 'development' && process.env.SKIP_AUTH === 'true') {
+  // 开发环境可选跳过鉴权（方便调试）；生产环境强制鉴权（SKIP_AUTH 配置被忽略）
+  if (SKIP_AUTH_ENABLED) {
     // 使用默认开发用户
     req.user = { userId: 'dev-user', username: 'dev', role: 'admin' }
     next()

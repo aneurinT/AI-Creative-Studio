@@ -65,6 +65,8 @@ import { registerMCPRoutes } from './services/toolRegistry.js'
 import { seedKnowledgeBase } from './services/ragKnowledge.js'
 import { getConcurrencyStats } from './services/concurrencyService.js'
 import { cleanupExpiredCheckpoints } from './services/checkpointService.js'
+import { initializeExperiencePool, flushExperiencePool } from './services/globalExperiencePool.js'
+import externalRoutes from './routes/external.js'
 
 // for esm mode
 const __filename = fileURLToPath(import.meta.url)
@@ -107,6 +109,9 @@ app.use(authMiddleware)
 // 初始化推理后端注册表（LTX / 未来 SVD 等）
 initInferenceBackends()
 
+// 初始化全局 Agent 经验池
+initializeExperiencePool()
+
 /**
  * API Routes
  */
@@ -133,6 +138,7 @@ app.use('/api/a2a', a2aRoutes)
 app.use('/api/social', socialMediaRoutes)
 app.use('/api/office', officeRoutes)
 app.use('/api/video-edit', videoEditRoutes)
+app.use('/api/external', externalRoutes)
 
 // A2A Agent Card 发现端点（无需 /api 前缀，符合 A2A 规范）
 app.use(a2aRoutes)
@@ -156,10 +162,17 @@ app.use(
   },
 )
 
-// 服务启动后异步初始化向量知识库 & 清理过期检查点
+// 服务启动后异步初始化向量知识库 & 清理过期检查点 & 经验池定期总结
 setTimeout(() => {
   seedKnowledgeBase().catch(err => console.warn('[Startup] 知识库种子导入失败:', err.message));
   cleanupExpiredCheckpoints();
+
+  // 每隔一段时间输出经验池统计
+  setInterval(() => {
+    const { generateExperienceSummary } = require('./services/globalExperiencePool.js');
+    const summary = generateExperienceSummary();
+    console.log(summary);
+  }, 3600000); // 每小时
 }, 3000);
 
 /**

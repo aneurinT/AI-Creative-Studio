@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express'
-import { generateImage, generateCaption, availableModels, modifyImage } from '../services/imageService.js'
+import { generateImage, generateCaption, availableModels, modifyImage, analyzeImageWithText } from '../services/imageService.js'
+import { imageToImage, understandVideo } from '../services/multimodalService.js'
 import { addToHistory } from '../services/historyService.js'
 
 const router = Router()
@@ -119,6 +120,82 @@ router.post('/caption', async (req: Request, res: Response): Promise<void> => {
     res.json(result)
   } catch (error) {
     console.error('Caption route error:', error)
+    res.status(500).json({
+      success: false,
+      error: `Server internal error: ${(error as Error).message}`,
+    })
+  }
+})
+
+/**
+ * POST /api/generate/analyze - 视觉+指令分析（图生图前置）
+ */
+router.post('/analyze', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { imageUrl, message } = req.body
+
+    if (!imageUrl || !message) {
+      res.status(400).json({ success: false, error: 'imageUrl 和 message 是必填项' })
+      return
+    }
+
+    const result = await analyzeImageWithText({ imageUrl, message })
+    res.json(result)
+  } catch (error) {
+    console.error('Analyze route error:', error)
+    res.status(500).json({
+      success: false,
+      error: `Server internal error: ${(error as Error).message}`,
+    })
+  }
+})
+
+/**
+ * POST /api/generate/img2img - 图生图（以图为基础修改风格/内容）
+ */
+router.post('/img2img', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { sourceImage, instruction, style, model, size } = req.body
+
+    if (!sourceImage || !instruction) {
+      res.status(400).json({ success: false, error: 'sourceImage 和 instruction 是必填项' })
+      return
+    }
+
+    const result = await imageToImage({ sourceImage, instruction, style, model, size })
+    if (result.success && result.imageUrl) {
+      addToHistory({
+        prompt: result.finalPrompt || instruction,
+        style: style || 'img2img',
+        imageUrl: result.imageUrl,
+      })
+    }
+    res.json(result)
+  } catch (error) {
+    console.error('Img2Img route error:', error)
+    res.status(500).json({
+      success: false,
+      error: `Server internal error: ${(error as Error).message}`,
+    })
+  }
+})
+
+/**
+ * POST /api/generate/video-understand - 视频理解（输入视频 → 描述/分镜脚本）
+ */
+router.post('/video-understand', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { videoUrl, mode, frameCount, focus } = req.body
+
+    if (!videoUrl) {
+      res.status(400).json({ success: false, error: 'videoUrl 是必填项' })
+      return
+    }
+
+    const result = await understandVideo({ videoUrl, mode, frameCount, focus })
+    res.json(result)
+  } catch (error) {
+    console.error('Video understand route error:', error)
     res.status(500).json({
       success: false,
       error: `Server internal error: ${(error as Error).message}`,
