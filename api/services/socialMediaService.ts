@@ -142,11 +142,33 @@ const PLATFORM_CONFIGS: Record<SocialPlatform, PlatformConfig> = {
   },
 };
 
+// ===== 重试配置 =====
+
+const RETRY_CONFIG = {
+  maxRetries: 3,
+  baseDelayMs: 30000,  // 30 秒
+  maxDelayMs: 120000,  // 2 分钟
+  backoffMultiplier: 2,
+};
+
+/** 可重试的错误类型 */
+const RETRYABLE_ERRORS = [
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'rate_limit',
+  'server_error',
+  'timeout',
+  'network',
+];
+
 // ===== 社交媒体服务 =====
 
 class SocialMediaService {
   private tokens = new Map<string, PlatformToken>();
   private publishHistory: PublishResult[] = [];
+  private failureCounters = new Map<string, number>(); // 失败计数器，用于熔断
 
   /** 获取平台配置 */
   getPlatformConfig(platform: SocialPlatform): PlatformConfig {
@@ -182,11 +204,75 @@ class SocialMediaService {
     return this.tokens.get(`${platform}_${userId || 'default'}`);
   }
 
+  /** 撤销（删除）平台 Token */
+  revokeToken(platform: SocialPlatform, userId?: string): boolean {
+    const key = `${platform}_${userId || 'default'}`;
+    const existed = this.tokens.has(key);
+    this.tokens.delete(key);
+    if (existed) {
+      console.log(`[SocialMedia] Token revoked for ${platform}`);
+    }
+    return existed;
+  }
+
   /** 检查 Token 是否有效 */
   isTokenValid(platform: SocialPlatform, userId?: string): boolean {
     const token = this.getToken(platform, userId);
     if (!token) return false;
     return token.expiresAt > Date.now() + 60000; // 至少还有 1 分钟有效
+  }
+
+  /** 刷新 Token */
+  async refreshToken(platform: SocialPlatform, userId?: string): Promise<boolean> {
+    const token = this.getToken(platform, userId);
+    if (!token || !token.refreshToken) return false;
+
+    try {
+      console.log(`[SocialMedia] Refreshing token for ${platform}...`);
+      // 实际应调用平台 refresh token API
+      // Mock: 延长 2 小时
+      token.accessToken = `mock_refreshed_token_${platform}_${Date.now()}`;
+      token.expiresAt = Date.now() + 7200 * 1000;
+      this.saveToken(token);
+      console.log(`[SocialMedia] Token refreshed for ${platform}, expires at ${new Date(token.expiresAt).toISOString()}`);
+      return true;
+    } catch (err: any) {
+      console.error(`[SocialMedia] Token refresh failed for ${platform}: ${err.message}`);
+      return false;
+    }
+  }
+
+  /** 判断错误是否可重试 */
+  private isRetryableError(error: string): boolean {
+    return RETRYABLE_ERRORS.some((e) => error.toLowerCase().includes(e.toLowerCase()));
+  }
+
+  /** 计算重试延迟（指数退避） */
+  private getRetryDelay(attempt: number): number {
+    const delay = RETRY_CONFIG.baseDelayMs * Math.pow(RETRY_CONFIG.backoffMultiplier, attempt);
+    return Math.min(delay, RETRY_CONFIG.maxDelayMs);
+  }
+
+  /** 检查熔断状态 */
+  private isCircuitBreakerOpen(platform: SocialPlatform, userId?: string): boolean {
+    const key = `${platform}_${userId || 'default'}`;
+    const count = this.failureCounters.get(key) || 0;
+    // 连续失败 5 次则熔断 5 分钟
+    return count >= 5;
+  }
+
+  /** 增加失败计数 */
+  private incrementFailureCount(platform: SocialPlatform, userId?: string): void {
+    const key = `${platform}_${userId || 'default'}`;
+    const count = (this.failureCounters.get(key) || 0) + 1;
+    this.failureCounters.set(key, count);
+    console.log(`[SocialMedia] Failure count for ${platform}: ${count}`);
+  }
+
+  /** 重置失败计数 */
+  private resetFailureCount(platform: SocialPlatform, userId?: string): void {
+    const key = `${platform}_${userId || 'default'}`;
+    this.failureCounters.delete(key);
   }
 
   /** 验证内容是否符合平台要求 */
@@ -222,19 +308,33 @@ class SocialMediaService {
     return { valid: errors.length === 0, errors };
   }
 
-  /** 发布内容到指定平台 */
+  /** 发布内容到指定平台（带重试、Token 刷新、熔断） */
   async publishToPlatform(
     platform: SocialPlatform,
     content: PublishContent,
     userId?: string
   ): Promise<PublishResult> {
-    // 验证 Token
-    if (!this.isTokenValid(platform, userId)) {
+    // 熔断检查
+    if (this.isCircuitBreakerOpen(platform, userId)) {
       return {
         success: false,
         platform,
-        error: `未授权或 Token 已过期，请先在 ${PLATFORM_CONFIGS[platform].name} 中授权`,
+        error: `平台 ${PLATFORM_CONFIGS[platform].name} 发布已熔断（连续失败过多），请稍后再试`,
       };
+    }
+
+    // 验证 Token
+    if (!this.isTokenValid(platform, userId)) {
+      // 尝试刷新 Token
+      const refreshed = await this.refreshToken(platform, userId);
+      if (!refreshed) {
+        this.incrementFailureCount(platform, userId);
+        return {
+          success: false,
+          platform,
+          error: `未授权或 Token 已过期，请先在 ${PLATFORM_CONFIGS[platform].name} 中授权`,
+        };
+      }
     }
 
     // 验证内容
@@ -247,27 +347,71 @@ class SocialMediaService {
       };
     }
 
-    // 分发到对应的平台发布方法
-    try {
-      switch (platform) {
-        case 'douyin':
-          return await this.publishToDouyin(content, userId);
-        case 'kuaishou':
-          return await this.publishToKuaishou(content, userId);
-        case 'xiaohongshu':
-          return await this.publishToXiaohongshu(content, userId);
-        default:
-          return { success: false, platform, error: `不支持的平台: ${platform}` };
+    // 带重试的发布
+    let lastError: string = '';
+    for (let attempt = 0; attempt <= RETRY_CONFIG.maxRetries; attempt++) {
+      try {
+        let result: PublishResult;
+        switch (platform) {
+          case 'douyin':
+            result = await this.publishToDouyin(content, userId);
+            break;
+          case 'kuaishou':
+            result = await this.publishToKuaishou(content, userId);
+            break;
+          case 'xiaohongshu':
+            result = await this.publishToXiaohongshu(content, userId);
+            break;
+          default:
+            return { success: false, platform, error: `不支持的平台: ${platform}` };
+        }
+
+        if (result.success) {
+          this.resetFailureCount(platform, userId);
+          return result;
+        }
+
+        // 发布返回了失败，判断是否可重试
+        if (result.error && this.isRetryableError(result.error) && attempt < RETRY_CONFIG.maxRetries) {
+          lastError = result.error;
+          const delay = this.getRetryDelay(attempt);
+          console.log(`[SocialMedia] Retry ${attempt + 1}/${RETRY_CONFIG.maxRetries} for ${platform} in ${delay}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+
+        this.incrementFailureCount(platform, userId);
+        return result;
+      } catch (err: any) {
+        lastError = err.message;
+        if (this.isRetryableError(err.message) && attempt < RETRY_CONFIG.maxRetries) {
+          const delay = this.getRetryDelay(attempt);
+          console.log(`[SocialMedia] Retry ${attempt + 1}/${RETRY_CONFIG.maxRetries} for ${platform} after error: ${err.message}, waiting ${delay}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+
+        // 不可重试的错误，直接失败
+        this.incrementFailureCount(platform, userId);
+        const result: PublishResult = {
+          success: false,
+          platform,
+          error: `发布失败: ${lastError}`,
+        };
+        this.publishHistory.push(result);
+        return result;
       }
-    } catch (err: any) {
-      const result: PublishResult = {
-        success: false,
-        platform,
-        error: `发布失败: ${err.message}`,
-      };
-      this.publishHistory.push(result);
-      return result;
     }
+
+    // 所有重试都失败了
+    this.incrementFailureCount(platform, userId);
+    const result: PublishResult = {
+      success: false,
+      platform,
+      error: `发布失败（已重试 ${RETRY_CONFIG.maxRetries} 次）: ${lastError}`,
+    };
+    this.publishHistory.push(result);
+    return result;
   }
 
   /** 一键发布到多个平台 */

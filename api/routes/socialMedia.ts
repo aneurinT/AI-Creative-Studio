@@ -6,6 +6,7 @@
 
 import { Router, type Request, type Response } from 'express';
 import { socialMediaService } from '../services/socialMediaService.js';
+import { scheduledPublishService } from '../services/scheduledPublishService.js';
 import type { SocialPlatform, PublishContent } from '../services/socialMediaService.js';
 
 const router = Router();
@@ -88,6 +89,17 @@ router.get('/auth/:platform/status', (req: Request, res: Response) => {
   const { userId } = req.query;
   const isValid = socialMediaService.isTokenValid(platform, userId as string);
   res.json({ success: true, data: { platform, authorized: isValid } });
+});
+
+/** POST /api/social/auth/:platform/revoke — 撤销授权 */
+router.post('/auth/:platform/revoke', (req: Request, res: Response) => {
+  const { platform } = req.params as { platform: SocialPlatform };
+  const { userId } = req.body;
+  const revoked = socialMediaService.revokeToken(platform, userId as string);
+  res.json({
+    success: true,
+    data: { platform, revoked, message: revoked ? '已解绑' : '未找到授权记录' },
+  });
 });
 
 // ==================== 内容发布 ====================
@@ -174,6 +186,88 @@ router.get('/health', (req: Request, res: Response) => {
     status: 'healthy',
     platforms: authStatus,
   });
+});
+
+// ==================== 定时发布调度 ====================
+
+/** POST /api/social/schedule — 创建定时发布任务 */
+router.post('/schedule', (req: Request, res: Response) => {
+  const { platforms, content, intervalMinutes, userId } = req.body as {
+    platforms: SocialPlatform[];
+    content: PublishContent;
+    intervalMinutes: number;
+    userId?: string;
+  };
+
+  if (!platforms || !Array.isArray(platforms) || platforms.length === 0) {
+    res.status(400).json({ success: false, error: 'platforms is required (non-empty array)' });
+    return;
+  }
+
+  if (!content || !content.title) {
+    res.status(400).json({ success: false, error: 'content.title is required' });
+    return;
+  }
+
+  if (!intervalMinutes || intervalMinutes < 10) {
+    res.status(400).json({ success: false, error: 'intervalMinutes must be >= 10' });
+    return;
+  }
+
+  const task = scheduledPublishService.createTask(platforms, content, intervalMinutes, userId);
+  res.status(201).json({ success: true, data: task });
+});
+
+/** GET /api/social/schedules — 获取所有定时任务 */
+router.get('/schedules', (req: Request, res: Response) => {
+  const tasks = scheduledPublishService.getAllTasks();
+  res.json({ success: true, data: tasks });
+});
+
+/** GET /api/social/schedule/:id — 获取单个定时任务 */
+router.get('/schedule/:id', (req: Request, res: Response) => {
+  const task = scheduledPublishService.getTask(req.params.id);
+  if (!task) {
+    res.status(404).json({ success: false, error: '任务不存在' });
+    return;
+  }
+  res.json({ success: true, data: task });
+});
+
+/** PATCH /api/social/schedule/:id — 更新定时任务（启用/暂停/修改间隔） */
+router.patch('/schedule/:id', (req: Request, res: Response) => {
+  const { enabled, intervalMinutes, content } = req.body as {
+    enabled?: boolean;
+    intervalMinutes?: number;
+    content?: Partial<PublishContent>;
+  };
+
+  const task = scheduledPublishService.updateTask(req.params.id, { enabled, intervalMinutes, content });
+  if (!task) {
+    res.status(404).json({ success: false, error: '任务不存在' });
+    return;
+  }
+  res.json({ success: true, data: task });
+});
+
+/** DELETE /api/social/schedule/:id — 删除定时任务 */
+router.delete('/schedule/:id', (req: Request, res: Response) => {
+  const deleted = scheduledPublishService.deleteTask(req.params.id);
+  if (!deleted) {
+    res.status(404).json({ success: false, error: '任务不存在' });
+    return;
+  }
+  res.json({ success: true, data: { deleted: true } });
+});
+
+/** POST /api/social/schedule/:id/run — 立即执行一次定时任务 */
+router.post('/schedule/:id/run', async (req: Request, res: Response) => {
+  const result = await scheduledPublishService.executeTaskNow(req.params.id);
+  if (!result.success && result.results.error === '任务不存在') {
+    res.status(404).json({ success: false, error: '任务不存在' });
+    return;
+  }
+  res.json({ success: result.success, data: result.results });
 });
 
 export default router;

@@ -1,4 +1,4 @@
-import { Sparkles, Wand2, Layers, Settings, Video, MessageSquare, FileText } from 'lucide-react';
+import { Sparkles, Wand2, Layers, Settings, Video, MessageSquare, FileText, Globe } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 
 export default function Navbar() {
@@ -12,6 +12,7 @@ export default function Navbar() {
     { path: '/ocr', label: 'OCR识别', icon: FileText, tip: '批量识别图片文字' },
     { path: '/compose', label: '图片合成', icon: Layers, tip: '提取主体并合成到新背景' },
     { path: '/settings', label: '模型配置', icon: Settings, tip: '配置各模型API Key' },
+    { path: '/social-bind', label: '账号绑定', icon: Globe, tip: '绑定抖音/快手/小红书账号，定时发布' },
   ];
 
   return (
