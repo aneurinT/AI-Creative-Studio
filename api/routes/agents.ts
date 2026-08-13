@@ -7,6 +7,7 @@ import { toolRegistry } from '../services/toolRegistry.js';
 import { analyzeParallelism, executePlan, type OrchestrationContext } from '../services/orchestrator.js';
 import { analyzeImageWithText } from '../services/imageService.js';
 import { supervisorRoute } from '../services/modelRouter.js';
+import { videoEditService, type EditOperation, type EditParams } from '../services/videoEditService.js';
 
 const execAsync = promisify(exec);
 const router = Router();
@@ -471,6 +472,55 @@ const AGENT_CONFIGS = {
 - 包含：主体描述 + 场景 + 光线 + 色调 + 构图 + 风格 + 画质关键词
 
 你是一个真正的创作者，不是 prompt 生成器。让你的艺术判断力主导创作。`,
+  },
+  videoEditor: {
+    name: '视频剪辑专家',
+    role: 'videoEditor',
+    systemPrompt: `你是一位顶级的视频后期制作专家。你精通视频剪辑、字幕制作、配音合成和片段替换。
+
+## 核心能力
+1. **字幕添加**：根据用户需求，为视频添加精准的字幕（烧录到视频上）
+2. **配音替换**：根据用户提供的文案，替换视频的音频轨道
+3. **片段替换**：识别用户指定的不满意的片段，用新素材替换
+4. **智能剪辑**：理解用户的剪辑意图，执行精准的裁剪和拼接
+
+## 工作方式
+
+### 第一步：理解意图
+- 用户想要修改什么？（字幕/配音/裁剪/替换片段）
+- 用户对当前视频哪个部分不满意？具体是什么问题？
+- 用户期望的最终效果是什么？
+
+### 第二步：精准分析
+- 如果是字幕：源语言是什么？字幕风格要求？
+- 如果是配音：配音文案是什么？需要什么音色和语速？
+- 如果是片段替换：替换哪个时间段？原因是什么？
+- 如果是裁剪：保留哪些部分？
+
+### 第三步：输出执行方案
+以 JSON 格式输出剪辑方案：
+{
+  "action": "subtitle" | "dubbing" | "trim" | "replace" | "smart-edit",
+  "analysis": "你对用户需求的理解和分析",
+  "params": {
+    "trimStart": 数字（秒）,
+    "trimEnd": 数字（秒）,
+    "subtitleLang": "zh",
+    "dubbingText": "配音文案",
+    "dubbingVoice": "zh-CN-XiaoxiaoNeural",
+    "dubbingSpeed": 1.0,
+    "replaceStart": 数字（秒）,
+    "replaceEnd": 数字（秒）,
+    "smartEditPrompt": "智能剪辑提示"
+  },
+  "explanation": "向用户解释你会如何处理这个视频"
+}
+
+## 重要规则
+- 你必须输出 JSON 格式，不要输出其他内容
+- 只输出执行方案，不要输出实际剪辑结果
+- 如果用户没有指定具体参数，你根据常识合理推断
+- 对于配音，如果用户没有指定音色，默认使用温柔女声`,
   },
 };
 
@@ -1000,6 +1050,139 @@ setInterval(() => {
 }, 60000);
 
 // ===== 调度编排端点 =====
+
+/** POST /api/agents/video/edit — 视频编辑 Agent（AI 助手二次修改） */
+router.post('/video/edit', async (req: Request, res: Response) => {
+  try {
+    const { message, sessionId: existingSessionId, history, videoPath, videoUrl } = req.body;
+    
+    if (!message) {
+      res.status(400).json({ success: false, error: 'message required' });
+      return;
+    }
+
+    const sessionId = existingSessionId || generateSessionId();
+    const config = AGENT_CONFIGS.videoEditor;
+
+    const existingContext = agentContexts.get(sessionId);
+    const context: AgentContext = existingContext || {
+      sessionId,
+      userInput: message,
+      thoughts: [],
+      taskHistory: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    // 在 system prompt 中添加视频信息
+    const enhancedPrompt = config.systemPrompt + 
+      (videoPath ? `\n\n当前视频路径: ${videoPath}` : '') +
+      (videoUrl ? `\n当前视频URL: ${videoUrl}` : '') +
+      '\n\n用户正在对已生成的视频提出修改需求，请仔细分析并给出精准的剪辑方案。';
+
+    context.thoughts.push({
+      agentName: config.name,
+      role: config.role,
+      step: 1,
+      thought: '🔗 分析用户对视频的修改需求：字幕/配音/剪辑/替换...',
+      timestamp: Date.now(),
+    });
+
+    context.thoughts.push({
+      agentName: config.name,
+      role: config.role,
+      step: 2,
+      thought: '🧠 推理模型正在深度分析剪辑方案...',
+      timestamp: Date.now(),
+    });
+
+    // 优先使用推理模型
+    const reasoningResult = await callReasoningAgent(message, enhancedPrompt, sessionId, history, config.role, 'video');
+    let hermesResponse = '';
+    let reasoningTrace = '';
+
+    if (reasoningResult) {
+      hermesResponse = reasoningResult.content;
+      reasoningTrace = reasoningResult.reasoning;
+    } else {
+      hermesResponse = await callHermesWithContext(message, enhancedPrompt, sessionId, history, config.role);
+    }
+
+    // 解析剪辑方案 JSON
+    let editPlan: any = null;
+    if (hermesResponse) {
+      try {
+        const jsonMatch = hermesResponse.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          editPlan = JSON.parse(jsonMatch[0]);
+        }
+      } catch {
+        // 非 JSON 格式，尝试文本解析
+        editPlan = {
+          action: 'smart-edit',
+          analysis: hermesResponse.substring(0, 200),
+          params: { smartEditPrompt: message },
+          explanation: hermesResponse.substring(0, 300),
+        };
+      }
+    }
+
+    // 如果提供了视频路径，直接执行剪辑
+    let editResult = null;
+    if (videoPath && editPlan && editPlan.action) {
+      try {
+        const operations: EditOperation[] = [editPlan.action];
+        const params: EditParams = editPlan.params || {};
+        const task = videoEditService.createTask(videoPath, operations, params);
+        editResult = await videoEditService.executeTask(task.id);
+      } catch (err: any) {
+        console.error('[VideoEdit Agent] Execution failed:', err.message);
+      }
+    }
+
+    // 记录记忆
+    recordAgentTurn({ sessionId, agentName: config.role, turnIndex: context.thoughts.length, role: 'user', content: message });
+    recordAgentTurn({ sessionId, agentName: config.role, turnIndex: context.thoughts.length + 1, role: 'assistant', content: JSON.stringify(editPlan).substring(0, 500) });
+    checkAndCompress(sessionId, config.role).catch(() => {});
+
+    context.thoughts.push({
+      agentName: config.name,
+      role: config.role,
+      step: 3,
+      thought: editResult ? '视频剪辑完成' : '剪辑方案已生成',
+      action: editPlan?.action || 'analyzed',
+      output: editResult ? `输出: ${editResult.outputUrl}` : JSON.stringify(editPlan).substring(0, 100),
+      timestamp: Date.now(),
+    });
+
+    context.finalResult = { editPlan, editResult };
+    context.updatedAt = Date.now();
+    recordTask(sessionId, config.role, `视频剪辑: ${editPlan?.action || '分析'}`, { action: editPlan?.action });
+    agentContexts.set(sessionId, context);
+
+    res.json({
+      success: true,
+      sessionId,
+      agentName: config.name,
+      role: config.role,
+      editPlan,
+      editResult: editResult ? {
+        outputUrl: editResult.outputUrl,
+        duration: editResult.duration,
+        fileSize: editResult.fileSize,
+      } : null,
+      thoughts: context.thoughts,
+      reasoning: reasoningTrace?.substring(0, 500),
+      modelUsed: reasoningResult ? 'reasoning' : 'instruction',
+    });
+  } catch (error) {
+    console.error('Video editor agent error:', error);
+    res.json({
+      success: false,
+      error: `视频剪辑分析失败: ${(error as Error).message}`,
+    });
+  }
+});
 
 /** POST /api/agents/orchestrate
  * 分析用户任务，生成执行计划（含并行判断 + 调度决策） */

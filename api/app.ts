@@ -57,6 +57,7 @@ import collaborationRoutes from './routes/collaboration.js'
 import a2aRoutes from './routes/a2a.js'
 import socialMediaRoutes from './routes/socialMedia.js'
 import officeRoutes from './routes/office.js'
+import videoEditRoutes from './routes/videoEdit.js'
 import { registerMCPRoutes } from './services/toolRegistry.js'
 import { seedKnowledgeBase } from './services/ragKnowledge.js'
 import { getConcurrencyStats } from './services/concurrencyService.js'
@@ -80,6 +81,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }))
 app.use('/images', express.static(path.join(__dirname, 'public/images')))
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')))
 app.use('/videos', express.static(path.join(__dirname, 'public/videos')))
+app.use('/edits', express.static(path.join(__dirname, 'public/edits')))
 
 /** 高并发保护中间件 — 限流 + 超时 + 连接追踪 */
 app.use(rateLimitMiddleware);
@@ -120,6 +122,7 @@ app.use('/api/collaboration', collaborationRoutes)
 app.use('/api/a2a', a2aRoutes)
 app.use('/api/social', socialMediaRoutes)
 app.use('/api/office', officeRoutes)
+app.use('/api/video-edit', videoEditRoutes)
 
 // A2A Agent Card 发现端点（无需 /api 前缀，符合 A2A 规范）
 app.use(a2aRoutes)

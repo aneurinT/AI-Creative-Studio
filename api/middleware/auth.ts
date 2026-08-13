@@ -63,6 +63,9 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     '/api/collaboration/',
     '/api/mock/',
     '/api/upload/',    // 图片/视频上传
+    '/api/video-edit/',  // AI 视频剪辑
+    '/api/social/',      // 社交媒体
+    '/api/office/',      // 办公工具
   ]
 
   if (publicPaths.some(p => req.path.startsWith(p))) {

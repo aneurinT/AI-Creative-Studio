@@ -88,7 +88,7 @@ class ScheduledPublishService {
   }
 
   /** 更新任务（启用/暂停） */
-  updateTask(id: string, updates: Partial<Pick<ScheduledTask, 'enabled' | 'intervalMinutes' | 'content'>>): ScheduledTask | null {
+  updateTask(id: string, updates: { enabled?: boolean; intervalMinutes?: number; content?: Partial<PublishContent> }): ScheduledTask | null {
     const task = this.tasks.get(id);
     if (!task) return null;
 

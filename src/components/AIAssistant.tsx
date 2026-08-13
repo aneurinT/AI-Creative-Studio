@@ -1332,6 +1332,131 @@ export default function AIAssistant() {
     setModifyInput('');
   }
 
+  /** 视频编辑 Agent 操作（字幕/配音/裁剪/替换片段） */
+  async function videoEditAction(instruction: string, messages: Message[]) {
+    const loadingId = `edit-loading-${Date.now()}`;
+    const controller = new AbortController();
+    activeTasksRef.current.set(loadingId, controller);
+    setMessages(prev => [...prev, {
+      id: loadingId,
+      role: 'assistant',
+      content: '🎬 视频剪辑专家正在分析你的需求...',
+      actionType: 'modify-video',
+      isGenerating: true,
+      progress: 0,
+      timestamp: Date.now(),
+    }]);
+
+    try {
+      // 查找最近一条已生成的视频消息
+      const lastVideoMessage = [...messages].reverse().find(
+        m => m.role === 'assistant' && m.generatedVideo && !m.isGenerating
+      );
+
+      const requestBody: any = {
+        message: instruction,
+        sessionId: sessionId,
+        history: messages.slice(-10).map(m => ({
+          role: m.role,
+          content: m.content,
+        })),
+      };
+
+      if (lastVideoMessage?.generatedVideo) {
+        requestBody.videoUrl = lastVideoMessage.generatedVideo;
+      }
+
+      const response = await fetch('/api/agents/video/edit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal,
+      });
+
+      const responseText = await response.text();
+      let data;
+      try {
+        data = responseText ? JSON.parse(responseText) : {};
+      } catch {
+        data = {};
+      }
+
+      if (data.success) {
+        const editPlan = data.editPlan;
+        const editResult = data.editResult;
+        const agentThoughts = data.thoughts || [];
+
+        let resultContent = '';
+
+        // 显示 Agent 思考过程
+        if (agentThoughts.length > 0) {
+          resultContent += '### 剪辑专家分析\n\n';
+          agentThoughts.forEach((t: any) => {
+            resultContent += `${t.thought}\n\n`;
+          });
+        }
+
+        // 显示剪辑方案
+        if (editPlan) {
+          resultContent += `### 剪辑方案\n\n`;
+          resultContent += `**操作类型**：${editPlan.action || '智能剪辑'}\n`;
+          if (editPlan.analysis) resultContent += `**分析**：${editPlan.analysis}\n`;
+          if (editPlan.explanation) resultContent += `**说明**：${editPlan.explanation}\n`;
+          resultContent += '\n';
+        }
+
+        // 显示剪辑结果
+        if (editResult) {
+          resultContent += `### 剪辑完成\n\n`;
+          resultContent += `视频已处理完成，请查看预览：\n`;
+        }
+
+        activeTasksRef.current.delete(loadingId);
+        setMessages(prev => prev.map(m => {
+          if (m.id === loadingId) {
+            return {
+              ...m,
+              content: resultContent || '视频剪辑方案已生成',
+              isGenerating: false,
+              generatedVideo: editResult?.outputUrl || undefined,
+              agentThoughts: agentThoughts.length > 0 ? agentThoughts : undefined,
+              params: editPlan || {},
+            };
+          }
+          return m;
+        }));
+      } else {
+        activeTasksRef.current.delete(loadingId);
+        setMessages(prev => prev.map(m => {
+          if (m.id === loadingId) {
+            return {
+              ...m,
+              content: `❌ 视频剪辑分析失败：${data.error || '未知错误'}\n\n你可以尝试在 [AI 视频剪辑](/video-edit) 页面手动操作。`,
+              isGenerating: false,
+            };
+          }
+          return m;
+        }));
+      }
+    } catch (error: any) {
+      if (error.name === 'AbortError') {
+        activeTasksRef.current.delete(loadingId);
+        return;
+      }
+      activeTasksRef.current.delete(loadingId);
+      setMessages(prev => prev.map(m => {
+        if (m.id === loadingId) {
+          return {
+            ...m,
+            content: `❌ 视频剪辑异常：${error.message}\n\n你可以尝试在 [AI 视频剪辑](/video-edit) 页面手动操作。`,
+            isGenerating: false,
+          };
+        }
+        return m;
+      }));
+    }
+  }
+
   async function generateVideoAction(params: Record<string, any>, agentThoughts: AgentThought[] = [], sessionId?: string) {
     const loadingId = `loading-${Date.now()}`;
     const controller = new AbortController();
@@ -2524,6 +2649,21 @@ export default function AIAssistant() {
         case 'modify-video': {
           const { modifyType, description, currentPrompt, currentStyle, currentDuration } = actionResult.params;
           
+          // 检测是否为字幕/配音/裁剪/替换类请求
+          const lowerDesc = (description || '').toLowerCase();
+          const isEditOperation =
+            lowerDesc.includes('字幕') || lowerDesc.includes('subtitle') ||
+            lowerDesc.includes('配音') || lowerDesc.includes('dubbing') || lowerDesc.includes('旁白') ||
+            lowerDesc.includes('替换') || lowerDesc.includes('replace') || lowerDesc.includes('换掉') ||
+            lowerDesc.includes('裁剪') || lowerDesc.includes('trim') || lowerDesc.includes('剪掉') ||
+            lowerDesc.includes('剪辑') || lowerDesc.includes('edit');
+
+          if (isEditOperation) {
+            // 字幕/配音/剪辑类请求 → 路由到视频编辑 Agent
+            await videoEditAction(description, messages);
+            break;
+          }
+
           // 对话式修改：查找最近一条已生成的视频消息，走 /api/video/modify 接口
           // 该接口会调用 LLM 生成优化后的新描述，而非直接重新生成
           const lastVideoMessage = [...messages].reverse().find(

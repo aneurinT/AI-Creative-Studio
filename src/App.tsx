@@ -8,6 +8,7 @@ import ImageComposer from "@/pages/ImageComposer";
 import OcrPage from "@/pages/OcrPage";
 import Settings from "@/pages/Settings";
 import SocialBind from "@/pages/SocialBind";
+import VideoEditor from "@/pages/VideoEditor";
 import Login from "@/pages/Login";
 
 /** 路由守卫：未登录重定向到登录页 */
@@ -42,6 +43,7 @@ function AppRoutes() {
       <Route path="/compose" element={<ProtectedRoute><ImageComposer /></ProtectedRoute>} />
       <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
       <Route path="/social-bind" element={<ProtectedRoute><SocialBind /></ProtectedRoute>} />
+      <Route path="/video-edit" element={<ProtectedRoute><VideoEditor /></ProtectedRoute>} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
