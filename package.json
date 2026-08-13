@@ -18,7 +18,9 @@
     "electron:dev": "tsx electron/main.ts",
     "electron:build": "tsc -p electron/tsconfig.json --outDir dist-electron && vite build",
     "dist": "npm run electron:build && electron-builder",
-    "dist:dir": "npm run electron:build && electron-builder --dir"
+    "dist:dir": "npm run electron:build && electron-builder --dir",
+    "db:migrate": "tsx api/scripts/migrate-json-to-sqlite.ts",
+    "postinstall": "electron-rebuild -f -w better-sqlite3 || echo \"electron-rebuild skipped (better-sqlite3 not installed yet)\""
   },
   "build": {
     "appId": "com.aicreativestudio.app",
@@ -27,6 +29,7 @@
       "output": "release-new"
     },
     "publish": "never",
+    "npmRebuild": true,
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
@@ -68,6 +71,7 @@
     "@imgly/background-removal": "^1.7.0",
     "@types/fluent-ffmpeg": "^2.1.28",
     "@types/multer": "^2.2.0",
+    "better-sqlite3": "^11.8.0",
     "clsx": "^2.1.1",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
@@ -84,6 +88,7 @@
     "zustand": "^5.0.3"
   },
   "devDependencies": {
+    "@electron/rebuild": "^3.6.0",
     "@eslint/js": "^9.25.0",
     "@types/cors": "^2.8.19",
     "@types/electron": "^1.6.12",

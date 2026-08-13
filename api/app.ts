@@ -35,6 +35,7 @@ console.error = (...args: any[]) => {
   if (currentLogLevel <= LOG_LEVELS.error) originalError(...args)
 }
 import { authMiddleware } from './middleware/auth.js'
+import { traceMiddleware } from './middleware/trace.js'
 import { rateLimitMiddleware, timeoutMiddleware, trackConnection, untrackConnection } from './services/concurrencyService.js'
 import authRoutes from './routes/auth.js'
 import generateRoutes from './routes/generate.js'
@@ -51,6 +52,8 @@ import agentsRoutes from './routes/agents.js'
 import uploadRoutes from './routes/upload.js'
 import chatRoutes from './routes/chat.js'
 import ltxRoutes from './routes/ltx.js'
+import tracesRoutes from './routes/traces.js'
+import { initInferenceBackends } from './services/inference/index.js'
 import knowledgeRoutes from './routes/knowledge.js'
 import ocrRoutes from './routes/ocr.js'
 import collaborationRoutes from './routes/collaboration.js'
@@ -92,11 +95,17 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
+/** 链路追踪中间件 — 为每个请求注入 traceId（贯穿 HTTP → orchestrator → agent） */
+app.use(traceMiddleware);
+
 /**
  * JWT 鉴权中间件
  * auth 路由和静态资源不经过鉴权
  */
 app.use(authMiddleware)
+
+// 初始化推理后端注册表（LTX / 未来 SVD 等）
+initInferenceBackends()
 
 /**
  * API Routes
@@ -116,6 +125,7 @@ app.use('/api/agents', agentsRoutes)
 app.use('/api/upload', uploadRoutes)
 app.use('/api/chat', chatRoutes)
 app.use('/api/ltx', ltxRoutes)
+app.use('/api/traces', tracesRoutes)
 app.use('/api/knowledge', knowledgeRoutes)
 app.use('/api/ocr', ocrRoutes)
 app.use('/api/collaboration', collaborationRoutes)

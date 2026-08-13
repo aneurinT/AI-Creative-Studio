@@ -1,39 +1,55 @@
 import { Router, type Request, type Response } from 'express'
-import { checkLtxHealth, createLtxVideoTask, getLtxModels } from '../services/ltxVideoService.js'
-import { getTaskProgress, removeTaskProgress } from '../services/videoTaskProgressService.js'
+import { inferenceRegistry } from '../services/inference/index.js'
+import type { InferenceTaskParams } from '../services/inference/types.js'
 
 const router = Router()
 
 /**
  * LTX-Video 本地视频生成路由
  *
- * 端点：
+ * 端点（保持不变）：
  *   GET  /api/ltx/health   - 检查 LTX 服务状态
  *   GET  /api/ltx/models   - 列出可用模型
- *   POST /api/ltx/generate - 提交视频生成任务
- *   GET  /api/ltx/status/:taskId - 查询任务状态（复用 videoTaskProgress）
+ *   POST /api/ltx/generate - 提交视频生成任务（通过默认推理后端）
+ *   GET  /api/ltx/status/:taskId - 查询任务状态
+ *
+ * health/models 查询 LTX 后端特有信息；generate/status 走默认后端（可插拔切换）。
  */
 
 // 健康检查
 router.get('/health', async (req: Request, res: Response): Promise<void> => {
   try {
-    const health = await checkLtxHealth()
-    res.json(health)
+    const result = await inferenceRegistry.get('ltx').healthCheck()
+    res.json({
+      available: result.available,
+      error: result.error,
+      cudaAvailable: result.details?.cudaAvailable,
+      gpuName: result.details?.gpuName,
+      gpuMemoryGb: result.details?.gpuMemoryGb,
+      ltxVideoInstalled: result.details?.ltxVideoInstalled,
+    })
   } catch (error) {
     res.json({
       available: false,
-      error: `健康检查异常: ${(error as Error).message}`,
+      error: `LTX 后端未注册或健康检查异常: ${(error as Error).message}`,
     })
   }
 })
 
 // 获取可用模型列表
-router.get('/models', (req: Request, res: Response) => {
-  const models = getLtxModels()
-  res.json({ success: true, models })
+router.get('/models', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const models = await inferenceRegistry.get('ltx').getModels()
+    res.json({ success: true, models })
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: `获取模型列表失败: ${(error as Error).message}`,
+    })
+  }
 })
 
-// 提交视频生成任务
+// 提交视频生成任务（走默认推理后端，便于未来切换为 SVD 等）
 router.post('/generate', async (req: Request, res: Response): Promise<void> => {
   try {
     const { prompt, style, duration, model, seed } = req.body
@@ -46,16 +62,17 @@ router.post('/generate', async (req: Request, res: Response): Promise<void> => {
       return
     }
 
-    console.log(`[LTX Route] Generate request: prompt="${prompt.substring(0, 50)}", duration=${duration}, model=${model}`)
+    console.log(`[LTX Route] Generate request: prompt="${String(prompt).substring(0, 50)}", duration=${duration}, model=${model}`)
 
-    const result = await createLtxVideoTask({
+    const params: InferenceTaskParams = {
       prompt,
       style: style || '',
       duration: duration || '5',
       model: model || 'ltxv-2b-distilled',
       seed,
-    })
+    }
 
+    const result = await inferenceRegistry.getDefault().startTask(params)
     res.json(result)
   } catch (error) {
     console.error('[LTX Route] Generate error:', error)
@@ -66,46 +83,41 @@ router.post('/generate', async (req: Request, res: Response): Promise<void> => {
   }
 })
 
-// 查询任务状态（复用 videoTaskProgress 持久化服务）
-router.get('/status/:taskId', (req: Request, res: Response): void => {
+// 查询任务状态
+router.get('/status/:taskId', async (req: Request, res: Response): Promise<void> => {
   try {
     const { taskId } = req.params
-    const progressInfo = getTaskProgress(taskId)
+    const { success, status, error } = await inferenceRegistry.getDefault().queryStatus(taskId)
 
-    if (progressInfo) {
-      const isCompleted = progressInfo.status === 'completed' && progressInfo.videoUrl
-      const isFailed = progressInfo.status === 'failed'
-
-      if (isCompleted) {
-        // 任务完成后延迟清理进度记录（5分钟后），避免持续占用内存
-        setTimeout(() => removeTaskProgress(taskId), 5 * 60 * 1000)
-        res.json({
-          success: true,
-          status: 'completed',
-          progress: 100,
-          videoUrl: progressInfo.videoUrl,
-        })
-      } else if (isFailed) {
-        // 失败任务也延迟清理
-        setTimeout(() => removeTaskProgress(taskId), 5 * 60 * 1000)
-        res.json({
-          success: false,
-          status: 'failed',
-          progress: 0,
-          error: progressInfo.error || '视频生成失败',
-        })
-      } else {
-        res.json({
-          success: true,
-          status: 'processing',
-          progress: progressInfo.progress || 0,
-        })
-      }
-    } else {
+    if (!success || !status) {
       res.json({
         success: false,
         status: 'failed',
-        error: 'LTX 任务记录不存在或已过期，请重新生成',
+        error: error || 'LTX 任务记录不存在或已过期，请重新生成',
+      })
+      return
+    }
+
+    // 保持原响应结构
+    if (status.status === 'completed') {
+      res.json({
+        success: true,
+        status: 'completed',
+        progress: 100,
+        videoUrl: status.videoUrl,
+      })
+    } else if (status.status === 'failed') {
+      res.json({
+        success: false,
+        status: 'failed',
+        progress: 0,
+        error: status.error || '视频生成失败',
+      })
+    } else {
+      res.json({
+        success: true,
+        status: 'processing',
+        progress: status.progress || 0,
       })
     }
   } catch (error) {

@@ -42,6 +42,9 @@
 | 📝 **图片描述** | 为图片生成文字描述（Image Caption） | ✅ |
 | 📚 **知识库** | RAG 检索增强（向量 + 关键词混合），12 个端点 | ✅ |
 | 👥 **多人协同** | 协作房间、消息广播、操作互斥锁、在线状态追踪 | ✅ |
+| 🎞️ **AI 视频剪辑** | AI 字幕、AI 配音、视频片段替换，大模型优先 + 本地插件降级 | ✅ |
+| 🌐 **社交媒体发布** | 抖音/快手/小红书一键发布，OAuth 授权 + 定时发布 + 熔断重试 | ✅ |
+| 📊 **链路追踪** | Agent 调度调用链可视化，Span 树 + 耗时分析 + 失败归因 | ✅ |
 
 ### Agent 特性
 
@@ -69,6 +72,10 @@
 | 🆓 **免费视频降级链** | Agnes 不可用时自动降级到智谱 → Seedance（免费优先） |
 | 💾 **持久化任务进度** | 视频任务进度持久化到磁盘，服务器重启后可恢复 |
 | 🎞️ **分镜脚本检测** | 三层判断（正则快速检测 → AI 语义判断 → 结构化解析） |
+| 🗄️ **双模数据库** | JSON（开发模式）↔ SQLite（生产模式）适配器层，`DB_MODE` 一键切换 |
+| 🔌 **可插拔推理后端** | LTX 抽象为标准接口的推理后端，注册表模式，可无缝替换为 SVD 等 |
+| 📊 **链路追踪** | 自研轻量 tracing，Span 树持久化，HTTP → orchestrator → agent 全链路 |
+| ⏰ **定时发布持久化** | 定时发布任务持久化到 DB，服务重启自动恢复，不丢失 |
 
 ---
 
@@ -106,8 +113,16 @@
 │  │4 级路由  │ │ 房间/锁  │ │ 限流/熔断/超时         │  │
 │  └──────────┘ └──────────┘ └───────────────────────┘  │
 │  ┌──────────┐ ┌──────────┐ ┌───────────────────────┐  │
-│  │ JSON DB  │ │ 日志系统  │ │ JWT 鉴权               │  │
-│  │8+ 张表   │ │ 按日分文件 │ │ 白名单+路由守卫         │  │
+│  │ 链路追踪  │ │ 推理后端  │ │ 社交媒体发布           │  │
+│  │Span 树   │ │ 可插拔   │ │ OAuth/定时/熔断        │  │
+│  └──────────┘ └──────────┘ └───────────────────────┘  │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │        DB 适配器层（JSON ↔ SQLite 双模式）         │  │
+│  │  13 张表 · DB_MODE 切换 · WAL 写入 · 重启恢复      │  │
+│  └──────────────────────────────────────────────────┘  │
+│  ┌──────────┐ ┌──────────┐ ┌───────────────────────┐  │
+│  │ 日志系统  │ │ JWT 鉴权  │ │ Trace 中间件           │  │
+│  │ 按日分文件 │ │ 白名单   │ │ traceId 注入           │  │
 │  └──────────┘ └──────────┘ └───────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
                             │
@@ -192,8 +207,8 @@ aiProject/
 │   ├── app.ts                    # Express 应用入口
 │   ├── server.ts                 # 服务器启动
 │   ├── index.ts                  # 导出入口
-│   ├── routes/                   # API 路由（17 个文件）
-│   │   ├── agents.ts             # Agent 调度路由（story/video/image + 编排）
+│   ├── routes/                   # API 路由（22 个文件）
+│   │   ├── agents.ts             # Agent 调度路由（story/video/image + 编排 + traceId 注入）
 │   │   ├── hermes.ts             # Hermes Agent（意图识别 + 审核 + 流式对话）
 │   │   ├── generate.ts           # 图片生成路由
 │   │   ├── video.ts              # 视频生成路由
@@ -204,16 +219,22 @@ aiProject/
 │   │   ├── config.ts             # 模型配置读写
 │   │   ├── history.ts            # 图片生成历史
 │   │   ├── knowledge.ts          # 知识库 CRUD + 搜索（12 个端点）
-│   │   ├── ltx.ts                # LTX 本地视频推理代理
+│   │   ├── ltx.ts                # LTX 本地视频推理代理（facade → inference 后端）
+│   │   ├── traces.ts             # 链路追踪查询（列表/详情/Span 树）
+│   │   ├── socialMedia.ts        # 社交媒体发布 + 定时任务调度
+│   │   ├── videoEdit.ts          # AI 视频剪辑（字幕/配音/片段替换）
+│   │   ├── office.ts             # 办公工具（钉钉/飞书/企业微信 Webhook）
+│   │   ├── a2a.ts                # A2A 协议端点
 │   │   ├── mock.ts               # Mock 数据生成
 │   │   ├── quota.ts              # 配额管理
 │   │   ├── removeBg.ts           # 智能抠图
 │   │   ├── storyboard.ts         # 分镜脚本检测与审核
 │   │   ├── test.ts               # 模型测试
 │   │   └── upload.ts             # 文件上传（图片/视频/图生视频）
-│   ├── services/                 # 核心服务（26 个文件）
+│   ├── services/                 # 核心服务
 │   │   ├── toolRegistry.ts       # MCP 协议 + Tool Calling 注册中心
-│   │   ├── orchestrator.ts       # Agent 调度编排器
+│   │   ├── orchestrator.ts       # Agent 调度编排器（含 tracing 埋点）
+│   │   ├── tracing.ts            # 链路追踪（startSpan/endSpan/createTrace）
 │   │   ├── agentMemory.ts        # 长短记忆系统
 │   │   ├── llmConfig.ts          # LLM 模型统一配置
 │   │   ├── modelRouter.ts        # 智能模型路由器（4 级路由）
@@ -224,7 +245,6 @@ aiProject/
 │   │   ├── ocrService.ts         # OCR 识别服务
 │   │   ├── reviewAgent.ts        # 内容审核 Agent + 自学习记忆
 │   │   ├── videoReviewAgent.ts   # 视频三级审核
-│   │   ├── database.ts           # JSON 文件数据库（WAL 写入）
 │   │   ├── sseService.ts         # SSE 流式输出服务
 │   │   ├── chatSessionService.ts # 聊天会话管理
 │   │   ├── collaborationService.ts # 多人协同服务
@@ -236,22 +256,34 @@ aiProject/
 │   │   ├── videoTaskProgressService.ts # 持久化任务进度
 │   │   ├── storyboardDetectorService.ts # 分镜脚本检测
 │   │   ├── freeVideoService.ts   # 免费视频降级链
-│   │   ├── ltxVideoService.ts    # LTX 本地视频推理客户端
+│   │   ├── ltxVideoService.ts    # LTX 推理 facade（委托 inference 后端）
+│   │   ├── socialMediaService.ts # 社交媒体发布（OAuth + 重试 + 熔断）
+│   │   ├── scheduledPublishService.ts # 定时发布调度（DB 持久化）
+│   │   ├── videoEditService.ts   # AI 视频剪辑（字幕/配音/片段替换）
+│   │   ├── officeService.ts      # 办公工具 Webhook（钉钉/飞书/企微）
+│   │   ├── checkpointService.ts  # 检查点服务
 │   │   ├── fetchUtils.ts         # HTTP 请求工具
 │   │   ├── loggerService.ts      # 结构化日志服务
-│   │   └── historyService.ts     # 图片历史服务
+│   │   ├── historyService.ts     # 图片历史服务
+│   │   ├── db/                   # 数据库适配器层（JSON ↔ SQLite 双模式）
+│   │   │   ├── index.ts          # facade（DB_MODE 切换 + 自动降级）
+│   │   │   ├── types.ts          # DatabaseAdapter 接口 + 13 张表行类型
+│   │   │   ├── jsonAdapter.ts    # JSON 文件实现（开发模式）
+│   │   │   └── sqliteAdapter.ts  # SQLite 实现（生产模式，WAL + 索引）
+│   │   └── inference/            # 可插拔推理后端抽象层
+│   │       ├── index.ts          # 后端初始化 + 注册
+│   │       ├── types.ts          # InferenceBackend 标准接口
+│   │       ├── registry.ts       # 后端注册表
+│   │       └── ltxBackend.ts     # LTX 后端实现
 │   ├── middleware/
-│   │   └── auth.ts               # JWT 鉴权中间件
+│   │   ├── auth.ts               # JWT 鉴权中间件
+│   │   └── trace.ts              # 链路追踪中间件（traceId 注入）
 │   └── data/                     # 数据存储（运行时生成）
-│       ├── chat_sessions.json
-│       ├── agent_long_memory.json
-│       ├── history.json
-│       ├── videoHistory.json
-│       ├── quotas.json
-│       ├── task_progress.json
+│       ├── *.json                # JSON 模式数据文件（DB_MODE=json）
+│       ├── app.db                # SQLite 数据库（DB_MODE=sqlite）
 │       └── logs/                 # 操作日志（按日分文件）
 ├── src/                          # 前端代码
-│   ├── App.tsx                   # 路由配置（9 个路由）
+│   ├── App.tsx                   # 路由配置（12 个路由）
 │   ├── main.tsx                  # 入口
 │   ├── components/               # 公共组件
 │   │   ├── AIAssistant.tsx       # AI 助手主组件（3000+ 行）
@@ -261,15 +293,18 @@ aiProject/
 │   │   ├── Empty.tsx             # 空状态占位
 │   │   ├── ImageUploader.tsx     # 图片上传（拖拽 + 图生视频）
 │   │   └── ModelSelector.tsx     # 模型选择器
-│   ├── pages/                    # 页面组件（9 个）
+│   ├── pages/                    # 页面组件（12 个）
 │   │   ├── AssistantPage.tsx     # AI 助手页（多 Agent 协作主入口）
 │   │   ├── Home.tsx              # 一键生图
 │   │   ├── NewHome.tsx           # 新版首页（开发中）
 │   │   ├── VideoGenerator.tsx    # 视频生成
+│   │   ├── VideoEditor.tsx       # AI 视频剪辑
 │   │   ├── RemoveBg.tsx          # 智能抠图
 │   │   ├── OcrPage.tsx           # OCR 识别
 │   │   ├── ImageComposer.tsx     # 图片合成
 │   │   ├── Settings.tsx          # 模型配置
+│   │   ├── SocialBind.tsx        # 社交账号绑定 + 定时发布管理
+│   │   ├── Traces.tsx            # 链路追踪可视化（Span 树时间线）
 │   │   └── Login.tsx             # 登录
 │   ├── hooks/
 │   │   ├── useSSE.ts             # SSE 流式 Hook
@@ -455,6 +490,26 @@ aiProject/
 | GET | `/api/tools/functions` | LLM Function Calling 格式 | ❌ |
 | GET | `/api/tools` | 简单工具列表 | ❌ |
 
+### 链路追踪
+
+| 方法 | 路径 | 说明 | 鉴权 |
+|------|------|------|:---:|
+| GET | `/api/traces` | Trace 列表（支持 status/limit 筛选） | ❌ |
+| GET | `/api/traces/:traceId` | Trace 详情（含 Span 调用树） | ❌ |
+
+### 社交媒体发布
+
+| 方法 | 路径 | 说明 | 鉴权 |
+|------|------|------|:---:|
+| POST | `/api/social/publish` | 一键多平台发布 | ❌ |
+| GET | `/api/social/accounts` | 已绑定账号列表 | ❌ |
+| GET | `/api/social/schedules` | 定时任务列表 | ❌ |
+| POST | `/api/social/schedule` | 创建定时发布任务 | ❌ |
+| GET | `/api/social/schedule/:id` | 获取单个定时任务 | ❌ |
+| PATCH | `/api/social/schedule/:id` | 更新任务（启用/暂停/改间隔） | ❌ |
+| DELETE | `/api/social/schedule/:id` | 删除定时任务 | ❌ |
+| POST | `/api/social/schedule/:id/run` | 立即执行一次定时任务 | ❌ |
+
 ---
 
 ## 🤖 Agent 系统
@@ -556,19 +611,27 @@ toolRegistry.register({
 - 信任度评分 0-1 + 记录用户修正
 - 7 天有效期
 
-### 数据库表
+### 数据库表（JSON ↔ SQLite 双模式）
 
-| 表名 | 文件 | 用途 |
-|------|------|------|
-| `chat_sessions` | `data/chat_sessions.json` | 聊天会话 |
-| `chat_messages` | `data/chat_messages.json` | 聊天消息 |
-| `agent_short_memory` | `data/agent_short_memory.json` | 短期记忆 |
-| `agent_long_memory` | `data/agent_long_memory.json` | 长期记忆 |
-| `video_tasks` | `data/video_tasks.json` | 视频任务 |
-| `history` | `data/history.json` | 图片生成历史 |
-| `videoHistory` | `data/videoHistory.json` | 视频生成历史 |
-| `quotas` | `data/quotas.json` | 配额数据 |
-| `task_progress` | `data/task_progress.json` | 任务进度持久化 |
+通过 `DB_MODE` 环境变量切换：`json`（默认，开发模式，每表一个 `.json` 文件）或 `sqlite`（生产模式，单文件 `app.db`，WAL + 索引）。适配器层 facade 自动选择实现，业务代码无感知。
+
+| 表名 | 用途 |
+|------|------|
+| `chat_sessions` | 聊天会话 |
+| `chat_messages` | 聊天消息 |
+| `agent_short_memory` | 短期记忆 |
+| `agent_long_memory` | 长期记忆 |
+| `video_tasks` | 视频任务 |
+| `history` | 图片生成历史 |
+| `videoHistory` | 视频生成历史 |
+| `video_task_progress` | 任务进度持久化（重启恢复） |
+| `operation_logs` | 操作日志 |
+| `checkpoints` | 检查点 |
+| `traces` | 链路追踪根记录 |
+| `trace_spans` | 链路追踪 Span（含父子关系 + 耗时 + 重试） |
+| `scheduled_tasks` | 定时发布任务（持久化，重启恢复） |
+
+> 数据迁移：`pnpm migrate:sqlite` 可将现有 JSON 数据导入 SQLite（见 `api/scripts/migrate-json-to-sqlite.ts`）。
 
 ---
 
@@ -659,6 +722,19 @@ CORS_ORIGIN=http://localhost:5173             # CORS 允许的源
 SKIP_AUTH=true                                # 开发环境跳过鉴权
 NODE_ENV=development                          # 运行环境
 OCR_SPACE_API_KEY=your_ocr_key                # ocr.space API Key（OCR 降级用）
+
+# 数据库配置（JSON ↔ SQLite 双模式）
+DB_MODE=json                                  # json（默认）| sqlite（生产推荐）
+# DB_PATH=./data/app.db                       # SQLite 文件路径（可选）
+
+# 推理后端配置（可插拔）
+INFERENCE_DEFAULT_BACKEND=ltx                 # 默认推理后端：ltx | svd（未来）
+LTX_ENABLED=true                              # 是否启用 LTX 后端
+
+# 社交媒体集成（可选）
+DOUYIN_CLIENT_KEY=your_douyin_key             # 抖音开放平台
+KUAISHOU_CLIENT_KEY=your_kuaishou_key         # 快手开放平台
+XIAOHONGSHU_CLIENT_KEY=your_xhs_key           # 小红书开放平台
 ```
 
 ---
@@ -667,23 +743,34 @@ OCR_SPACE_API_KEY=your_ocr_key                # ocr.space API Key（OCR 降级�
 
 | 指标 | 数据 |
 |------|------|
-| **前端路由** | 9 个 |
-| **页面文件** | 9 个 |
+| **前端路由** | 12 个 |
+| **页面文件** | 12 个 |
 | **前端组件** | 7 个 |
-| **API 端点** | 85+ 个 |
-| **路由文件** | 17 个 |
-| **服务文件** | 26 个 |
+| **API 端点** | 100+ 个 |
+| **路由文件** | 22 个 |
+| **服务文件** | 30+ 个 |
 | **Agent 数量** | 5 个 + 1 编排器 |
 | **AI 模型引擎** | 8 个 |
 | **MCP 工具** | 8 个 |
-| **数据库表** | 9 张 |
+| **数据库表** | 13 张（JSON/SQLite 双模式） |
+| **推理后端** | 可插拔（LTX 已实现，SVD 可扩展） |
 | **部署形态** | 4 种（Docker / Electron / Vercel / 传统） |
-| **编译错误** | 0 |
 | **TypeScript** | 严格模式 |
 
 ---
 
 ## 📝 更新日志
+
+### v2.1 (2026-08) — 架构与性能优化
+
+- 🏗 **数据库适配器层**：JSON（开发模式）↔ SQLite（生产模式）双模式，`DB_MODE` 一键切换，13 张表统一通过 `DatabaseAdapter` 接口访问，facade 自动降级
+- 📊 **Agent 链路追踪**：自研轻量 tracing 中间件，HTTP → orchestrator → agent 全链路 Span 树持久化，前端 `/traces` 页面可视化（调用树 + 甘特时间线 + 失败归因）
+- 🔌 **可插拔推理后端**：LTX 抽象为标准 `InferenceBackend` 接口（启动/查询/取消/回调），注册表模式，未来可无缝替换为 SVD 等
+- ⏰ **定时发布持久化**：定时任务从内存 Map 迁移到 DB 适配器，服务重启自动恢复，`scheduled_tasks` 表 + 复合索引
+- 🎞️ **AI 视频剪辑**：AI 字幕 / AI 配音 / 片段替换，大模型优先 + 本地插件（FFmpeg/Whisper/Edge-TTS）降级
+- 🌐 **社交媒体一键发布**：抖音/快手/小红书 OAuth 授权 + 自动重试（指数退避）+ 熔断器 + 定时调度
+- 🧭 **导航菜单整合**：9 个扁平菜单重组为 AI 助手 + 视频模块/图片模块/配置模块/运维监控 4 个下拉分组
+- 🔧 迁移脚本 `migrate-json-to-sqlite.ts` 支持 JSON → SQLite 数据迁移
 
 ### v2.0 (2026-08)
 

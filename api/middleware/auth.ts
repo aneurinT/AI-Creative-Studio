@@ -60,6 +60,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     '/api/tools',
     '/api/agents/orchestrate',
     '/api/agents/execute-plan',
+    '/api/traces',
     '/api/collaboration/',
     '/api/mock/',
     '/api/upload/',    // 图片/视频上传

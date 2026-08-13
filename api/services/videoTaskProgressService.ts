@@ -1,16 +1,17 @@
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import { getDb } from './db/index.js';
+import type { TaskProgressRow } from './db/types.js';
 
 /**
- * 持久化的视频任务进度服务
+ * 持久化的视频任务进度服务（已桥接至数据库适配器）
  *
  * 解决问题：videoTaskProgress 原本是内存对象，服务器重启后会丢失，
  * 导致 split_/merge_ 复合任务无法恢复，前端报"任务记录不存在或已过期"。
  *
- * 本服务将进度持久化到磁盘，服务器重启后可自动恢复进行中的任务状态。
+ * 本服务通过 DatabaseAdapter 的 getProgressTable() 持久化进度，
+ * 服务器重启后可自动恢复进行中的任务状态。
  *
- * 并发安全：使用内存缓存 + 写操作队列串行化，避免多任务并发写入时丢失数据。
+ * 并发安全：内存 L1 缓存加速高频读轮询，写操作同步落盘到适配器
+ * （JSON 模式延迟保存，SQLite 模式事务即时持久化）。
  */
 
 export interface TaskProgress {
@@ -30,96 +31,85 @@ export interface TaskProgress {
   updatedAt: number;
 }
 
-interface ProgressFileData {
-  tasks: Record<string, TaskProgress>;
-}
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const progressFilePath = path.join(__dirname, '../data/videoTaskProgress.json');
-
 /** 进度记录过期时间：2小时（与前端轮询超时对齐） */
 const PROGRESS_EXPIRE_MS = 2 * 60 * 60 * 1000;
 
-/** 内存缓存：所有读写操作优先访问内存，避免频繁磁盘IO */
+/** 内存 L1 缓存：加速高频读轮询（每5秒一次），写时同步更新缓存与适配器 */
 let taskCache: Record<string, TaskProgress> = {};
 
-/** 写操作队列：串行化所有文件写入，避免竞态条件 */
-let writeQueue: Promise<void> = Promise.resolve();
+// ===== 行映射 =====
 
-/** 防抖写入：短时间内多次更新只写一次磁盘 */
-let writeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-const WRITE_DEBOUNCE_MS = 500;
-
-function ensureFile(): void {
-  const dataDir = path.dirname(progressFilePath);
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-  }
-  if (!fs.existsSync(progressFilePath)) {
-    fs.writeFileSync(progressFilePath, JSON.stringify({ tasks: {} }, null, 2));
-  }
+function toRow(taskId: string, p: TaskProgress): TaskProgressRow {
+  return {
+    task_id: taskId,
+    progress: p.progress,
+    status: p.status,
+    video_url: p.videoUrl ?? null,
+    error: p.error ?? null,
+    task_type: p.taskType,
+    prompt: p.prompt ?? null,
+    style: p.style ?? null,
+    duration: p.duration ?? null,
+    created_at: p.createdAt,
+    updated_at: p.updatedAt,
+  };
 }
 
-/** 从磁盘加载到内存缓存（启动时调用一次） */
-function loadFromDisk(): void {
-  ensureFile();
+function fromRow(r: TaskProgressRow): TaskProgress {
+  return {
+    progress: r.progress,
+    status: r.status as TaskProgress['status'],
+    videoUrl: r.video_url ?? undefined,
+    error: r.error ?? undefined,
+    taskType: r.task_type as TaskProgress['taskType'],
+    prompt: r.prompt ?? undefined,
+    style: r.style ?? undefined,
+    duration: r.duration ?? undefined,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+/** 从适配器加载到内存缓存（启动时调用一次） */
+function loadFromAdapter(): void {
   try {
-    const data = fs.readFileSync(progressFilePath, 'utf-8');
-    const parsed = JSON.parse(data) as ProgressFileData;
-    taskCache = parsed.tasks || {};
+    const table = getDb().getProgressTable();
+    const rows = table.all();
+    taskCache = {};
+    for (const row of rows) {
+      taskCache[row.task_id] = fromRow(row);
+    }
   } catch (error) {
-    console.error('[TaskProgress] 读取进度文件失败:', error);
+    console.error('[TaskProgress] 从适配器加载失败:', error);
     taskCache = {};
   }
-}
-
-/** 防抖写入：将内存缓存写入磁盘（异步，不阻塞事件循环） */
-function scheduleDiskWrite(): void {
-  if (writeDebounceTimer) {
-    clearTimeout(writeDebounceTimer);
-  }
-  writeDebounceTimer = setTimeout(() => {
-    writeDebounceTimer = null;
-    flushToDisk();
-  }, WRITE_DEBOUNCE_MS);
-}
-
-/** 将内存缓存写入磁盘（串行化，避免竞态条件） */
-function flushToDisk(): void {
-  const dataToWrite = JSON.stringify({ tasks: taskCache }, null, 2);
-  writeQueue = writeQueue.then(() => {
-    return new Promise<void>(resolve => {
-      fs.writeFile(progressFilePath, dataToWrite, 'utf-8', err => {
-        if (err) {
-          console.error('[TaskProgress] 写入进度文件失败:', err);
-        }
-        resolve();
-      });
-    });
-  });
 }
 
 /** 清理过期的进度记录（超过2小时未更新） */
 function cleanupExpired(): void {
   const now = Date.now();
-  let changed = false;
+  const expiredIds: string[] = [];
 
   for (const taskId of Object.keys(taskCache)) {
     const task = taskCache[taskId];
     if (now - task.updatedAt > PROGRESS_EXPIRE_MS) {
       delete taskCache[taskId];
-      changed = true;
+      expiredIds.push(taskId);
     }
   }
 
-  if (changed) {
-    scheduleDiskWrite();
+  if (expiredIds.length > 0) {
+    try {
+      const table = getDb().getProgressTable();
+      table.deleteWhere(r => expiredIds.includes(r.task_id));
+    } catch (error) {
+      console.error('[TaskProgress] 清理过期记录失败:', error);
+    }
   }
 }
 
 /** 启动时加载缓存并清理过期记录 */
-loadFromDisk();
+loadFromAdapter();
 cleanupExpired();
 
 /** 定期清理过期记录（每30分钟） */
@@ -131,7 +121,10 @@ export function getTaskProgress(taskId: string): TaskProgress | undefined {
 }
 
 /** 设置/更新任务进度 */
-export function setTaskProgress(taskId: string, progress: Partial<TaskProgress> & { taskType?: 'normal' | 'split' | 'merge' }): void {
+export function setTaskProgress(
+  taskId: string,
+  progress: Partial<TaskProgress> & { taskType?: 'normal' | 'split' | 'merge' },
+): void {
   const existing = taskCache[taskId];
 
   const now = Date.now();
@@ -148,7 +141,11 @@ export function setTaskProgress(taskId: string, progress: Partial<TaskProgress> 
     updatedAt: now,
   };
 
-  scheduleDiskWrite();
+  try {
+    getDb().getProgressTable().upsert(toRow(taskId, taskCache[taskId]));
+  } catch (error) {
+    console.error('[TaskProgress] 写入适配器失败:', error);
+  }
 }
 
 /** 更新进度（便捷方法，只更新部分字段） */
@@ -163,7 +160,11 @@ export function updateTaskProgress(taskId: string, updates: Partial<TaskProgress
     updatedAt: Date.now(),
   };
 
-  scheduleDiskWrite();
+  try {
+    getDb().getProgressTable().upsert(toRow(taskId, taskCache[taskId]));
+  } catch (error) {
+    console.error('[TaskProgress] 写入适配器失败:', error);
+  }
   return true;
 }
 
@@ -171,7 +172,11 @@ export function updateTaskProgress(taskId: string, updates: Partial<TaskProgress
 export function removeTaskProgress(taskId: string): void {
   if (taskCache[taskId]) {
     delete taskCache[taskId];
-    scheduleDiskWrite();
+    try {
+      getDb().getProgressTable().delete(taskId);
+    } catch (error) {
+      console.error('[TaskProgress] 从适配器删除失败:', error);
+    }
   }
 }
 

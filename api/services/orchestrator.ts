@@ -11,6 +11,8 @@
 import { getChatApiKey, CHAT_API, CHAT_MODEL } from './llmConfig.js';
 import { recall, remember } from './agentMemory.js';
 import { addOperationLog } from './database.js';
+import { startSpan, endSpan, createTrace, finishTrace, setSpanRetryCount } from './tracing.js';
+import type { ActiveSpan } from './tracing.js';
 
 // ===== 类型定义 =====
 
@@ -46,6 +48,10 @@ export interface OrchestrationContext {
   videoContext?: any;
   /** 所有 agent 共享的上下文快照 */
   sharedContext: Record<string, any>;
+  /** 链路追踪 ID（由 traceMiddleware 注入，贯穿整个调度链路） */
+  traceId?: string;
+  /** 父 span ID（executePlan 设置为 planSpan.spanId，供 executeWithRetry 子 span 继承） */
+  parentSpanId?: string;
 }
 
 // ===== 并行判断 — LLM 分析用户任务 =====
@@ -83,15 +89,22 @@ export async function analyzeParallelism(
   userMessage: string,
   context: OrchestrationContext
 ): Promise<OrchestrationPlan> {
+  const traceId = context.traceId;
+  const span = traceId
+    ? startSpan(traceId, context.parentSpanId || null, 'orchestrator', 'analyzeParallelism', { userMessage: userMessage.substring(0, 200) })
+    : null;
+
   const apiKey = getChatApiKey();
   if (!apiKey) {
     // 无 LLM 时：单任务顺序执行
-    return {
+    const result = {
       tasks: [createDefaultTask(userMessage, context)],
-      executionMode: 'sequential',
+      executionMode: 'sequential' as const,
       reasoning: '无 LLM 可用，默认串行执行',
       parallelGroups: [['task-0']],
     };
+    if (span) endSpan(span, 'success', { executionMode: result.executionMode });
+    return result;
   }
 
   try {
@@ -144,22 +157,26 @@ export async function analyzeParallelism(
       tasks.push(createDefaultTask(userMessage, context));
     }
 
-    return {
+    const successResult = {
       tasks,
       executionMode: parsed.executionMode || 'sequential',
       reasoning: parsed.reasoning || 'AI 分析完成',
       parallelGroups: parsed.parallelGroups || [tasks.map(t => t.id)],
     };
+    if (span) endSpan(span, 'success', { executionMode: successResult.executionMode, reasoning: successResult.reasoning });
+    return successResult;
 
   } catch (err) {
     console.warn('[Orchestrator] 并行分析失败，使用默认串行:', (err as Error).message);
     const task = createDefaultTask(userMessage, context);
-    return {
+    const failResult = {
       tasks: [task],
-      executionMode: 'sequential',
+      executionMode: 'sequential' as const,
       reasoning: `分析异常(${(err as Error).message})，默认串行执行`,
       parallelGroups: [[task.id]],
     };
+    if (span) endSpan(span, 'failed', undefined, (err as Error).message);
+    return failResult;
   }
 }
 
@@ -219,10 +236,14 @@ export async function executeWithRetry(
   let lastError = '';
 
   for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
+    const span = context.traceId
+      ? startSpan(context.traceId, context.parentSpanId || null, task.agentName, task.action, { attempt, maxRetries: config.maxRetries, taskId: task.id })
+      : null;
     try {
       task.status = 'running';
       task.startTime = Date.now();
       task.retryCount = attempt;
+      if (span) setSpanRetryCount(span, attempt);
 
       const result = await executor(task);
       task.status = 'success';
@@ -238,6 +259,7 @@ export async function executeWithRetry(
         result: 'success',
       });
 
+      if (span) endSpan(span, 'success', result);
       return task;
 
     } catch (err) {
@@ -290,6 +312,20 @@ export async function executePlan(
   const completed = new Map<string, AgentTask>();
   const results: AgentTask[] = [];
 
+  // 顶层 root span：包裹整个计划执行，作为所有子任务 span 的父节点
+  const planSpan = context.traceId
+    ? startSpan(
+      context.traceId,
+      context.parentSpanId || null,
+      'orchestrator',
+      'executePlan',
+      { executionMode: plan.executionMode, taskCount: plan.tasks.length, reasoning: plan.reasoning.substring(0, 200) },
+    )
+    : null;
+  // 让子任务（executeWithRetry）的 span 继承 planSpan
+  if (planSpan) context.parentSpanId = planSpan.spanId;
+  const planStart = Date.now();
+
   addOperationLog({
     level: 'INFO', category: 'agent-orchestration',
     session_id: context.sessionId,
@@ -302,39 +338,45 @@ export async function executePlan(
   context.sharedContext.executionPlan = plan;
   context.sharedContext.taskCount = plan.tasks.length;
 
-  if (plan.executionMode === 'parallel' || plan.executionMode === 'hybrid') {
-    // 按并行组执行
-    for (const group of plan.parallelGroups) {
-      const groupTasks = group.map(id => plan.tasks.find(t => t.id === id)).filter(Boolean) as AgentTask[];
+  try {
+    if (plan.executionMode === 'parallel' || plan.executionMode === 'hybrid') {
+      // 按并行组执行
+      for (const group of plan.parallelGroups) {
+        const groupTasks = group.map(id => plan.tasks.find(t => t.id === id)).filter(Boolean) as AgentTask[];
 
-      if (groupTasks.length > 1) {
-        // 并行组：同时执行
-        console.log(`[Orchestrator] 并行执行 ${groupTasks.length} 个任务:`, groupTasks.map(t => t.agentName));
-        const groupResults = await Promise.allSettled(
-          groupTasks.map(task => executeWithRetry(task, t => executor(t, context), context))
-        );
-        groupResults.forEach((r, i) => {
-          const task = r.status === 'fulfilled' ? r.value : { ...groupTasks[i], status: 'failed' as const, error: r.reason };
+        if (groupTasks.length > 1) {
+          // 并行组：同时执行
+          console.log(`[Orchestrator] 并行执行 ${groupTasks.length} 个任务:`, groupTasks.map(t => t.agentName));
+          const groupResults = await Promise.allSettled(
+            groupTasks.map(task => executeWithRetry(task, t => executor(t, context), context))
+          );
+          groupResults.forEach((r, i) => {
+            const task = r.status === 'fulfilled' ? r.value : { ...groupTasks[i], status: 'failed' as const, error: r.reason };
+            completed.set(task.id, task);
+            results.push(task);
+            context.sharedContext.lastResult = task.result;
+          });
+        } else {
+          // 单任务串行
+          const task = await executeWithRetry(groupTasks[0], t => executor(t, context), context);
           completed.set(task.id, task);
           results.push(task);
           context.sharedContext.lastResult = task.result;
-        });
-      } else {
-        // 单任务串行
-        const task = await executeWithRetry(groupTasks[0], t => executor(t, context), context);
-        completed.set(task.id, task);
-        results.push(task);
-        context.sharedContext.lastResult = task.result;
+        }
+      }
+    } else {
+      // 纯串行
+      for (const task of plan.tasks) {
+        const executed = await executeWithRetry(task, t => executor(t, context), context);
+        completed.set(executed.id, executed);
+        results.push(executed);
+        context.sharedContext.lastResult = executed.result;
       }
     }
-  } else {
-    // 纯串行
-    for (const task of plan.tasks) {
-      const executed = await executeWithRetry(task, t => executor(t, context), context);
-      completed.set(executed.id, executed);
-      results.push(executed);
-      context.sharedContext.lastResult = executed.result;
-    }
+  } catch (err) {
+    // 计划级异常（非单任务失败）
+    if (planSpan) endSpan(planSpan, 'failed', undefined, (err as Error).message);
+    throw err;
   }
 
   // 存储执行摘要到长期记忆
@@ -344,7 +386,17 @@ export async function executePlan(
     category: 'execution_summary',
     content: `用户"${context.userMessage.substring(0, 80)}" → 执行: ${summary}`,
     importance: 0.5,
-  }).catch(() => {});
+  }).catch(() => { });
+
+  // 结束 root span：状态根据子任务结果汇总
+  const failCount = results.filter(r => r.status === 'failed').length;
+  if (planSpan) {
+    endSpan(planSpan, failCount === 0 ? 'success' : 'failed', {
+      successCount: results.length - failCount,
+      failCount,
+      totalDurationMs: Date.now() - planStart,
+    });
+  }
 
   return results;
 }

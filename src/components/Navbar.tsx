@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Sparkles, Wand2, Layers, Settings, Video, MessageSquare, FileText, Globe, Film, Image, ChevronDown } from 'lucide-react';
+import { Sparkles, Wand2, Layers, Settings, Video, MessageSquare, FileText, Globe, Film, Image, ChevronDown, Activity } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 
 interface NavGroup {
@@ -40,6 +40,13 @@ export default function Navbar() {
         { path: '/social-bind', label: '账号绑定', icon: Globe, tip: '绑定抖音/快手/小红书账号，定时发布' },
       ],
     },
+    {
+      label: '运维监控',
+      icon: Activity,
+      items: [
+        { path: '/traces', label: '链路追踪', icon: Activity, tip: 'Agent 调度调用链路、耗时分析与失败归因' },
+      ],
+    },
   ];
 
   // Click outside to close dropdown
@@ -75,11 +82,10 @@ export default function Navbar() {
           <Link
             to="/assistant"
             title="多Agent协作的智能对话助手"
-            className={`px-3 py-2 rounded-lg flex items-center gap-1.5 transition-all ${
-              location.pathname === '/assistant'
+            className={`px-3 py-2 rounded-lg flex items-center gap-1.5 transition-all ${location.pathname === '/assistant'
                 ? 'bg-purple-100 text-purple-700 font-medium'
                 : 'text-gray-600 hover:bg-gray-100'
-            }`}
+              }`}
           >
             <MessageSquare className="w-4 h-4" />
             AI助手
@@ -97,11 +103,10 @@ export default function Navbar() {
                   onClick={() => setOpenGroup(isOpen ? null : group.label)}
                   onMouseEnter={() => setOpenGroup(group.label)}
                   title={group.label}
-                  className={`px-3 py-2 rounded-lg flex items-center gap-1.5 transition-all ${
-                    active
+                  className={`px-3 py-2 rounded-lg flex items-center gap-1.5 transition-all ${active
                       ? 'bg-purple-100 text-purple-700 font-medium'
                       : 'text-gray-600 hover:bg-gray-100'
-                  }`}
+                    }`}
                 >
                   <Icon className="w-4 h-4" />
                   {group.label}
@@ -123,11 +128,10 @@ export default function Navbar() {
                           to={item.path}
                           title={item.tip}
                           onClick={() => setOpenGroup(null)}
-                          className={`px-3.5 py-2 flex items-center gap-2 transition-all text-sm ${
-                            isActive
+                          className={`px-3.5 py-2 flex items-center gap-2 transition-all text-sm ${isActive
                               ? 'bg-purple-50 text-purple-700 font-medium'
                               : 'text-gray-600 hover:bg-gray-50'
-                          }`}
+                            }`}
                         >
                           <ItemIcon className="w-3.5 h-3.5 flex-shrink-0" />
                           {item.label}

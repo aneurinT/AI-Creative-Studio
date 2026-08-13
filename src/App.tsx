@@ -9,6 +9,7 @@ import OcrPage from "@/pages/OcrPage";
 import Settings from "@/pages/Settings";
 import SocialBind from "@/pages/SocialBind";
 import VideoEditor from "@/pages/VideoEditor";
+import Traces from "@/pages/Traces";
 import Login from "@/pages/Login";
 
 /** 路由守卫：未登录重定向到登录页 */
@@ -44,6 +45,7 @@ function AppRoutes() {
       <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
       <Route path="/social-bind" element={<ProtectedRoute><SocialBind /></ProtectedRoute>} />
       <Route path="/video-edit" element={<ProtectedRoute><VideoEditor /></ProtectedRoute>} />
+      <Route path="/traces" element={<ProtectedRoute><Traces /></ProtectedRoute>} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

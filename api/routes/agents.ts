@@ -1,4 +1,4 @@
-﻿import { Router, type Request, type Response } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { REASONING_MODEL, REASONING_API, getReasoningApiKey, REASONING_FALLBACK_MODEL, REASONING_FALLBACK_API, getReasoningFallbackApiKey } from '../services/llmConfig.js';
@@ -8,6 +8,7 @@ import { analyzeParallelism, executePlan, type OrchestrationContext } from '../s
 import { analyzeImageWithText } from '../services/imageService.js';
 import { supervisorRoute } from '../services/modelRouter.js';
 import { videoEditService, type EditOperation, type EditParams } from '../services/videoEditService.js';
+import { createTrace, finishTrace } from '../services/tracing.js';
 
 const execAsync = promisify(exec);
 const router = Router();
@@ -32,7 +33,7 @@ async function enrichMessageWithVision(
   try {
     const primaryImage = imageUrls[0];
     console.log(`[Agent Vision] Analyzing image for agent: ${primaryImage.substring(0, 80)}...`);
-    
+
     const visionResult = await analyzeImageWithText({
       imageUrl: primaryImage,
       message: message,
@@ -42,9 +43,9 @@ async function enrichMessageWithVision(
       const extraImagesNote = imageUrls.length > 1
         ? `（用户还提供了 ${imageUrls.length - 1} 张参考图片）`
         : '';
-      
+
       const enrichedMessage = `【参考图片视觉描述】${visionResult.description}${extraImagesNote}\n\n【用户指令】${message}\n\n请基于以上图片内容和用户指令进行创作。你的创作应该以图片中的主体、场景、风格为参考基础。`;
-      
+
       console.log(`[Agent Vision] Image analyzed: ${visionResult.description.substring(0, 60)}...`);
       return { message: enrichedMessage, imageDescription: visionResult.description };
     }
@@ -175,7 +176,7 @@ async function callReasoningAgent(
   // 获取 Agent 上下文（含历史任务记录）
   const context = agentContexts.get(sessionId);
   const prevResult = context?.finalResult ? JSON.stringify(context.finalResult).substring(0, 800) : '';
-  
+
   // 构建历史任务摘要
   const taskHistorySummary = buildTaskHistorySummary(context);
 
@@ -356,7 +357,7 @@ async function callHermesWithContext(message: string, systemPrompt: string, sess
       const response = lines.join('\n').trim();
       if (response && !response.includes('系统指令') && !response.includes('请提供')) return response;
     }
-  } catch {}
+  } catch { }
 
   // 最终降级：本地模板
   return generateMockScript(message);
@@ -536,7 +537,7 @@ router.get('/health', async (req: Request, res: Response) => {
 router.get('/context/:sessionId', (req: Request, res: Response) => {
   const { sessionId } = req.params;
   const context = agentContexts.get(sessionId);
-  
+
   if (context) {
     res.json({
       success: true,
@@ -553,7 +554,7 @@ router.get('/context/:sessionId', (req: Request, res: Response) => {
 router.get('/context/:sessionId/thoughts', (req: Request, res: Response) => {
   const { sessionId } = req.params;
   const context = agentContexts.get(sessionId);
-  
+
   if (context) {
     res.json({
       success: true,
@@ -572,14 +573,14 @@ router.get('/context/:sessionId/thoughts', (req: Request, res: Response) => {
 router.post('/story/write', async (req: Request, res: Response) => {
   try {
     const { message, sessionId: existingSessionId, history, imageUrls } = req.body;
-    
+
     // 多模态预处理：分析参考图片
     const visionResult = await enrichMessageWithVision(message, imageUrls);
     const enrichedMessage = visionResult.message;
-    
+
     const sessionId = existingSessionId || generateSessionId();
     const config = AGENT_CONFIGS.storyWriter;
-    
+
     const existingContext = agentContexts.get(sessionId);
     const context: AgentContext = existingContext || {
       sessionId,
@@ -618,7 +619,7 @@ router.post('/story/write', async (req: Request, res: Response) => {
       // 降级到指令模型
       hermesResponse = await callHermesWithContext(enrichedMessage, config.systemPrompt, sessionId, history, config.role);
     }
-    
+
     let script = '';
     if (hermesResponse) {
       script = hermesResponse;
@@ -630,7 +631,7 @@ router.post('/story/write', async (req: Request, res: Response) => {
     recordAgentTurn({ sessionId, agentName: config.role, turnIndex: context.thoughts.length, role: 'user', content: message });
     recordAgentTurn({ sessionId, agentName: config.role, turnIndex: context.thoughts.length + 1, role: 'assistant', content: script.substring(0, 500), summary: script.substring(0, 100) });
     // 检查并压缩
-    checkAndCompress(sessionId, config.role).catch(() => {});
+    checkAndCompress(sessionId, config.role).catch(() => { });
 
     context.thoughts.push({
       agentName: config.name,
@@ -670,14 +671,14 @@ router.post('/story/write', async (req: Request, res: Response) => {
 router.post('/video/analyze', async (req: Request, res: Response) => {
   try {
     const { script, sessionId: existingSessionId, originalMessage, history, imageUrls } = req.body;
-    
+
     // 多模态预处理：分析参考图片，将视觉信息融入脚本
     const visionResult = await enrichMessageWithVision(script, imageUrls);
     const enrichedScript = visionResult.message;
-    
+
     const sessionId = existingSessionId || generateSessionId();
     const config = AGENT_CONFIGS.videoMaker;
-    
+
     const existingContext = agentContexts.get(sessionId);
     const context: AgentContext = existingContext || {
       sessionId,
@@ -715,10 +716,10 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
     } else {
       hermesResponse = await callHermesWithContext(enrichedScript, config.systemPrompt, sessionId, history, config.role);
     }
-    
+
     // 短期记忆
     recordAgentTurn({ sessionId, agentName: config.role, turnIndex: 0, role: 'user', content: enrichedScript?.substring(0, 300) });
-    checkAndCompress(sessionId, config.role).catch(() => {});
+    checkAndCompress(sessionId, config.role).catch(() => { });
 
     let analysis = {};
     if (hermesResponse) {
@@ -773,14 +774,14 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
 router.post('/image/analyze', async (req: Request, res: Response) => {
   try {
     const { message, sessionId: existingSessionId, history, imageUrls } = req.body;
-    
+
     // 多模态预处理：分析参考图片
     const visionResult = await enrichMessageWithVision(message, imageUrls);
     const enrichedMessage = visionResult.message;
-    
+
     const sessionId = existingSessionId || generateSessionId();
     const config = AGENT_CONFIGS.imageCreator;
-    
+
     const existingContext = agentContexts.get(sessionId);
     const context: AgentContext = existingContext || {
       sessionId,
@@ -818,10 +819,10 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
     } else {
       hermesResponse = await callHermesWithContext(enrichedMessage, config.systemPrompt, sessionId, history);
     }
-    
+
     // 短期记忆
     recordAgentTurn({ sessionId, agentName: config.role, turnIndex: 0, role: 'user', content: message?.substring(0, 300) });
-    checkAndCompress(sessionId, config.role).catch(() => {});
+    checkAndCompress(sessionId, config.role).catch(() => { });
 
     let analysis = {};
     if (hermesResponse) {
@@ -876,11 +877,11 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
 router.post('/video/generate', async (req: Request, res: Response) => {
   try {
     const { sessionId, script, originalMessage, history, imageUrls } = req.body;
-    
+
     // 多模态预处理
     const visionResult = await enrichMessageWithVision(script, imageUrls);
     const enrichedScript = visionResult.message;
-    
+
     const config = AGENT_CONFIGS.videoMaker;
     const existingContext = agentContexts.get(sessionId || '');
     const context: AgentContext = existingContext || {
@@ -919,10 +920,10 @@ router.post('/video/generate', async (req: Request, res: Response) => {
     } else {
       hermesResponse = await callHermesWithContext(enrichedScript, config.systemPrompt, sessionId, history, config.role);
     }
-    
+
     // 短期记忆
     recordAgentTurn({ sessionId, agentName: config.role, turnIndex: 0, role: 'user', content: enrichedScript?.substring(0, 300) });
-    checkAndCompress(sessionId, config.role).catch(() => {});
+    checkAndCompress(sessionId, config.role).catch(() => { });
 
     let analysis = {};
     if (hermesResponse) {
@@ -976,7 +977,7 @@ router.post('/video/generate', async (req: Request, res: Response) => {
 
 function generateMockScript(message: string): string {
   console.log(`[Mock Script] 降级使用本地模板，用户需求: "${message.substring(0, 80)}"`);
-  
+
   // 降级模板仅作为最后兜底，不再预设具体内容
   // 让 Agent 在前面的 LLM 调用中自由发挥
   return `【故事创作专家 - 离线降级模式】
@@ -1055,7 +1056,7 @@ setInterval(() => {
 router.post('/video/edit', async (req: Request, res: Response) => {
   try {
     const { message, sessionId: existingSessionId, history, videoPath, videoUrl } = req.body;
-    
+
     if (!message) {
       res.status(400).json({ success: false, error: 'message required' });
       return;
@@ -1075,7 +1076,7 @@ router.post('/video/edit', async (req: Request, res: Response) => {
     };
 
     // 在 system prompt 中添加视频信息
-    const enhancedPrompt = config.systemPrompt + 
+    const enhancedPrompt = config.systemPrompt +
       (videoPath ? `\n\n当前视频路径: ${videoPath}` : '') +
       (videoUrl ? `\n当前视频URL: ${videoUrl}` : '') +
       '\n\n用户正在对已生成的视频提出修改需求，请仔细分析并给出精准的剪辑方案。';
@@ -1143,7 +1144,7 @@ router.post('/video/edit', async (req: Request, res: Response) => {
     // 记录记忆
     recordAgentTurn({ sessionId, agentName: config.role, turnIndex: context.thoughts.length, role: 'user', content: message });
     recordAgentTurn({ sessionId, agentName: config.role, turnIndex: context.thoughts.length + 1, role: 'assistant', content: JSON.stringify(editPlan).substring(0, 500) });
-    checkAndCompress(sessionId, config.role).catch(() => {});
+    checkAndCompress(sessionId, config.role).catch(() => { });
 
     context.thoughts.push({
       agentName: config.name,
@@ -1187,14 +1188,20 @@ router.post('/video/edit', async (req: Request, res: Response) => {
 /** POST /api/agents/orchestrate
  * 分析用户任务，生成执行计划（含并行判断 + 调度决策） */
 router.post('/orchestrate', async (req: Request, res: Response) => {
+  const traceId = req.traceId;
+  const startTs = Date.now();
+  const sessionId = req.body?.sessionId || `session_${Date.now()}`;
+  if (traceId) createTrace(traceId, sessionId, req.body?.message || '');
+
   try {
-    const { message, sessionId, history } = req.body;
+    const { message, history } = req.body;
     if (!message) { res.status(400).json({ success: false, error: 'message required' }); return; }
 
     const context: OrchestrationContext = {
-      sessionId: sessionId || `session_${Date.now()}`,
+      sessionId,
       userMessage: message,
       history: history || [],
+      traceId,
       sharedContext: {
         lastAction: history?.slice(-1)?.[0]?.actionType || '',
         existingImage: history?.slice(-5).find((m: any) => m.generatedImage)?.generatedImage || '',
@@ -1211,9 +1218,11 @@ router.post('/orchestrate', async (req: Request, res: Response) => {
     } catch { /* ok */ }
 
     const plan = await analyzeParallelism(message, context);
-    res.json({ success: true, plan });
+    if (traceId) finishTrace(traceId, 'success', Date.now() - startTs, 1);
+    res.json({ success: true, plan, traceId });
 
   } catch (err) {
+    if (traceId) finishTrace(traceId, 'failed', Date.now() - startTs, 0);
     res.status(500).json({ success: false, error: (err as Error).message });
   }
 });
@@ -1221,14 +1230,20 @@ router.post('/orchestrate', async (req: Request, res: Response) => {
 /** POST /api/agents/execute-plan
  * 执行调度计划（含重试+回退机制） */
 router.post('/execute-plan', async (req: Request, res: Response) => {
+  const traceId = req.traceId;
+  const startTs = Date.now();
+  const sessionId = req.body?.sessionId || `session_${Date.now()}`;
+  if (traceId) createTrace(traceId, sessionId, req.body?.message || '');
+
   try {
-    const { plan, sessionId, message, history } = req.body;
+    const { plan, message, history } = req.body;
     if (!plan) { res.status(400).json({ success: false, error: 'plan required' }); return; }
 
     const context: OrchestrationContext = {
-      sessionId: sessionId || `session_${Date.now()}`,
+      sessionId,
       userMessage: message || '',
       history: history || [],
+      traceId,
       sharedContext: {},
     };
 
@@ -1241,13 +1256,20 @@ router.post('/execute-plan', async (req: Request, res: Response) => {
     const successCount = results.filter(r => r.status === 'success').length;
     const failCount = results.filter(r => r.status === 'failed').length;
 
+    if (traceId) {
+      // span 数 = 1(plan root) + 任务数（每个任务至少 1 个 span，含重试则更多）
+      finishTrace(traceId, failCount === 0 ? 'success' : 'failed', Date.now() - startTs, results.length + 1);
+    }
+
     res.json({
       success: failCount === 0,
       results,
+      traceId,
       summary: `${results.length}个任务: ${successCount}成功, ${failCount}失败`,
     });
 
   } catch (err) {
+    if (traceId) finishTrace(traceId, 'failed', Date.now() - startTs, 0);
     res.status(500).json({ success: false, error: (err as Error).message });
   }
 });
