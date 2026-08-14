@@ -282,7 +282,7 @@ export default function AIAssistant() {
     const backendTaskId = taskIdMapRef.current.get(messageId);
     if (backendTaskId) {
       taskIdMapRef.current.delete(messageId);
-      fetch(`/api/video/cancel/${backendTaskId}`, { method: 'POST', headers: authHeaders() }).catch(() => {});
+      fetch(`/api/video/cancel/${backendTaskId}`, { method: 'POST', headers: authHeaders() }).catch(() => { });
     }
     setMessages(prev => {
       const updated = prev.map(m => {
@@ -328,7 +328,7 @@ export default function AIAssistant() {
       const backendTaskId = taskIdMapRef.current.get(task.id);
       if (backendTaskId) {
         taskIdMapRef.current.delete(task.id);
-        fetch(`/api/video/cancel/${backendTaskId}`, { method: 'POST', headers: authHeaders() }).catch(() => {});
+        fetch(`/api/video/cancel/${backendTaskId}`, { method: 'POST', headers: authHeaders() }).catch(() => { });
       }
     });
     setMessages(prev => prev.map(m => {
@@ -361,7 +361,7 @@ export default function AIAssistant() {
     try {
       const response = await fetch('/api/chat/sessions', { headers: authHeaders() });
       const data = await response.json();
-      
+
       if (data.success && data.sessions.length > 0) {
         const latestSession = data.sessions[0];
         setCurrentSession(latestSession);
@@ -382,7 +382,7 @@ export default function AIAssistant() {
         body: JSON.stringify({ title: '新会话' }),
       });
       const data = await response.json();
-      
+
       if (data.success) {
         const defaultMessages: ChatMessage[] = [
           {
@@ -420,7 +420,7 @@ export default function AIAssistant() {
 
   async function saveMessageToSession(message: ChatMessage) {
     if (!currentSession) return;
-    
+
     try {
       await fetch(`/api/chat/sessions/${currentSession.id}/messages`, {
         method: 'POST',
@@ -434,7 +434,7 @@ export default function AIAssistant() {
 
   async function updateSessionMessages(newMessages: ChatMessage[]) {
     if (!currentSession) return;
-    
+
     try {
       await fetch(`/api/chat/sessions/${currentSession.id}`, {
         method: 'PUT',
@@ -651,7 +651,7 @@ export default function AIAssistant() {
 
   function recognizeAction(text: string): { action: string; params: Record<string, any> } {
     const lowerText = text.toLowerCase();
-    
+
     if (lowerText.includes('修改') || lowerText.includes('更改') || lowerText.includes('换成') || lowerText.includes('改成')) {
       let modifyType = 'background';
       if (lowerText.includes('背景')) modifyType = 'background';
@@ -659,10 +659,10 @@ export default function AIAssistant() {
       else if (lowerText.includes('音乐') || lowerText.includes('bgm') || lowerText.includes('音效')) modifyType = 'music';
       else if (lowerText.includes('剧情') || lowerText.includes('故事') || lowerText.includes('情节')) modifyType = 'story';
       else if (lowerText.includes('风格')) modifyType = 'style';
-      
+
       const hasVideoKeyword = lowerText.includes('视频') || lowerText.includes('video');
       const hasImageKeyword = lowerText.includes('图片') || lowerText.includes('image') || lowerText.includes('图');
-      
+
       if (hasVideoKeyword || (!hasImageKeyword && videoContext)) {
         return {
           action: 'modify-video',
@@ -688,7 +688,7 @@ export default function AIAssistant() {
     }
 
     let action = 'image';
-    
+
     if (lowerText.includes('视频') || lowerText.includes('video')) {
       action = 'video';
     } else if (lowerText.includes('抠图') || lowerText.includes('去背景') || lowerText.includes('移除背景')) {
@@ -1083,7 +1083,7 @@ export default function AIAssistant() {
                   imgAnalysis = `\n\n🔍 审核Agent诊断：${analysisData.result.reason}\n💡 建议：\n${analysisData.result.suggestions.map((s: string) => `• ${s}`).join('\n')}`;
                 }
               }
-            } catch {}
+            } catch { }
             setMessages(prev => prev.map(m => {
               if (m.id === loadingId) {
                 return {
@@ -1490,7 +1490,7 @@ export default function AIAssistant() {
           qualityBadge = `\n✅ **审核评分：${score}/100**`;
         }
       }
-    } catch {}
+    } catch { }
 
     // 如果后端返回了分镜脚本，显示分镜预览
     const sceneBreakdown = params.sceneBreakdown;
@@ -1711,7 +1711,7 @@ export default function AIAssistant() {
               console.log('[VideoReview] 审核不通过，关闭旧任务并重新生成...');
 
               // 通知后端取消旧任务（如果有后台轮询）
-              await fetch(`/api/video/cancel/${currentTaskId}`, { method: 'POST', headers: authHeaders() }).catch(() => {});
+              await fetch(`/api/video/cancel/${currentTaskId}`, { method: 'POST', headers: authHeaders() }).catch(() => { });
 
               // 更新提示
               setMessages(prev => prev.map(m => {
@@ -1739,7 +1739,7 @@ export default function AIAssistant() {
               });
               const retryText = await retryResp.text();
               let retryData: any = {};
-              try { retryData = JSON.parse(retryText); } catch {}
+              try { retryData = JSON.parse(retryText); } catch { }
 
               if (retryData.success && retryData.taskId) {
                 const newTaskId = retryData.taskId;
@@ -1819,7 +1819,7 @@ export default function AIAssistant() {
                     analysis = `\n\n🔍 审核Agent诊断：${analysisData.result.reason}\n💡 建议：\n${analysisData.result.suggestions.map((s: string) => `• ${s}`).join('\n')}`;
                   }
                 }
-              } catch {}
+              } catch { }
 
               const errorTip = (isExpired
                 ? `❌ 视频生成失败: ${errorMsg}`
@@ -1870,7 +1870,7 @@ export default function AIAssistant() {
                     analysis = `\n\n🔍 审核Agent诊断：${analysisData.result.reason}\n💡 建议：\n${analysisData.result.suggestions.map((s: string) => `• ${s}`).join('\n')}`;
                   }
                 }
-              } catch {}
+              } catch { }
 
               setMessages(prev => prev.map(m => {
                 if (m.id === loadingId) {
@@ -1944,7 +1944,7 @@ export default function AIAssistant() {
             await fetch(`/api/video/cancel/${currentTaskId}`, {
               method: 'POST',
               headers: authHeaders(),
-            }).catch(() => {});
+            }).catch(() => { });
 
             // 审核 Agent 分析最终失败原因
             let finalAnalysis = '';
@@ -1967,7 +1967,7 @@ export default function AIAssistant() {
                   finalAnalysis = `\n\n🔍 审核Agent诊断：${analysisData.result.reason}\n💡 建议：\n${analysisData.result.suggestions.map((s: string) => `• ${s}`).join('\n')}`;
                 }
               }
-            } catch {}
+            } catch { }
 
             setMessages(prev => prev.map(m => {
               if (m.id === loadingId) {
@@ -2113,7 +2113,7 @@ export default function AIAssistant() {
     if (newUrls.length > 0) {
       setPendingAttachmentImages(prev => [...prev, ...newUrls].slice(0, 5));
     }
-    
+
     if (errors.length > 0 && newUrls.length === 0) {
       setMessages(prev => [...prev, {
         id: `upload-error-${Date.now()}`,
@@ -2403,7 +2403,7 @@ export default function AIAssistant() {
       }
 
       let actionResult = recognizeAction(sendText);
-      
+
       if (hermesResult.action) {
         actionResult.action = hermesResult.action;
         actionResult.params = { ...actionResult.params, ...hermesResult.params };
@@ -2460,7 +2460,7 @@ export default function AIAssistant() {
         case 'compose': {
           // 并行任务：同时生成图片和视频
           console.log('[Compose] 并行执行图片+视频任务');
-          
+
           // 图片生成任务（不阻塞视频流程）
           generateImageAction({
             prompt: actionResult.params?.prompt || sendText,
@@ -2468,7 +2468,7 @@ export default function AIAssistant() {
           }).catch(err => {
             console.error('[Compose] Image generation failed:', err);
           });
-          
+
           // fall-through 到 video 流程（不走 break）
         }
         case 'video': {
@@ -2495,7 +2495,7 @@ export default function AIAssistant() {
 
           const storyResult = await callStoryWriter(sendText, imageUrls);
           clearInterval(storyThoughtTimer);
-          
+
           // 🔍 审核 Agent：实时审核脚本质量
           let scriptReviewBadge = '';
           if (storyResult.success && storyResult.script) {
@@ -2518,9 +2518,9 @@ export default function AIAssistant() {
               } else if (r && r.level === 'warning') {
                 scriptReviewBadge = `\n\n⚠️ **审核提示：${r.message}**`;
               }
-            } catch {}
+            } catch { }
           }
-          
+
           if (storyResult.success && storyResult.script) {
             setMessages(prev => prev.map(m => {
               if (m.id === loadingId) {
@@ -2648,7 +2648,7 @@ export default function AIAssistant() {
         }
         case 'modify-video': {
           const { modifyType, description, currentPrompt, currentStyle, currentDuration } = actionResult.params;
-          
+
           // 检测是否为字幕/配音/裁剪/替换类请求
           const lowerDesc = (description || '').toLowerCase();
           const isEditOperation =
@@ -2669,7 +2669,7 @@ export default function AIAssistant() {
           const lastVideoMessage = [...messages].reverse().find(
             m => m.role === 'assistant' && m.generatedVideo && !m.isGenerating
           );
-          
+
           if (lastVideoMessage) {
             // 有已生成视频，走修改接口
             const originPrompt = lastVideoMessage.originalPrompt || currentPrompt || '';
@@ -2935,599 +2935,611 @@ export default function AIAssistant() {
 
         <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
           {messages.map(message => {
-          const isNew = !animatedMessageIdsRef.current.has(message.id);
-          if (isNew) animatedMessageIdsRef.current.add(message.id);
-          return (
-          <div
-            key={message.id}
-            className={`flex gap-3 ${message.role === 'user' ? 'justify-end' : 'justify-start'} ${isNew ? 'msg-enter' : ''}`}
-            style={isNew ? { animationDelay: '0ms' } : undefined}
-          >
-            <div
-              className={`max-w-[75%] rounded-2xl px-4 py-3 ${
-                message.role === 'user'
-                  ? 'bg-purple-600 text-white rounded-br-md'
-                  : 'bg-white text-gray-800 rounded-bl-md shadow-sm hover-lift'
-              }`}
-            >
-              <div className="flex items-center gap-2 mb-1">
-                <span className="text-xs text-gray-500">
-                  {message.role === 'user' ? '你' : 'AI助手'}
-                </span>
-                <span className="text-xs text-gray-400">
-                  {formatTime(message.timestamp)}
-                </span>
-              </div>
-              
-              <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+            const isNew = !animatedMessageIdsRef.current.has(message.id);
+            if (isNew) animatedMessageIdsRef.current.add(message.id);
+            return (
+              <div
+                key={message.id}
+                className={`flex gap-3 ${message.role === 'user' ? 'justify-end' : 'justify-start'} ${isNew ? 'msg-enter' : ''}`}
+                style={isNew ? { animationDelay: '0ms' } : undefined}
+              >
+                <div
+                  className={`max-w-[75%] rounded-2xl px-4 py-3 ${message.role === 'user'
+                    ? 'bg-purple-600 text-white rounded-br-md'
+                    : 'bg-white text-gray-800 rounded-bl-md shadow-sm hover-lift'
+                    }`}
+                >
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-xs text-gray-500">
+                      {message.role === 'user' ? '你' : 'AI助手'}
+                    </span>
+                    <span className="text-xs text-gray-400">
+                      {formatTime(message.timestamp)}
+                    </span>
+                  </div>
 
-              {message.generatedImage && (
-                <div className="mt-3 rounded-lg overflow-hidden border border-gray-200 result-reveal">
-                  <img
-                    src={message.generatedImage}
-                    alt="Generated"
-                    className="w-full h-auto max-h-64 object-contain"
-                  />
-                  <div className="p-3 bg-gray-50 border-t border-gray-200">
-                    <div className="flex gap-2 mb-2 flex-wrap">
-                      <button
-                        onClick={() => {
-                          setModifyInputId(modifyInputId === message.id ? null : message.id);
-                          setModifyInput('');
+                  <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+
+                  {message.generatedImage && (
+                    <div className="mt-3 rounded-lg overflow-hidden border border-gray-200 result-reveal">
+                      <img
+                        src={message.generatedImage}
+                        alt="Generated"
+                        className="w-full h-auto max-h-64 object-contain"
+                        onError={(e) => {
+                          const img = e.target as HTMLImageElement;
+                          img.onerror = null;
+                          img.src = 'data:image/svg+xml,' + encodeURIComponent(
+                            '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200" viewBox="0 0 400 200">' +
+                            '<rect width="400" height="200" fill="#f3f4f6"/>' +
+                            '<text x="200" y="100" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif" font-size="14" fill="#9ca3af">图片已失效或已被清理</text>' +
+                            '</svg>'
+                          );
                         }}
-                        className="flex items-center gap-1 px-3 py-1.5 text-xs bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors"
-                      >
-                        <Wand2 className="w-3 h-3" />
-                        修改图片
-                      </button>
-                      {/* 引用外部图片链接进行修改 */}
-                      <button
-                        onClick={() => {
-                          setModifyInputId(modifyInputId === message.id ? null : message.id);
-                          setModifyInput('');
-                          setModifyRefImageUrl(modifyRefImageUrl === message.id ? null : message.id);
-                        }}
-                        className={`flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg transition-colors ${
-                          modifyRefImageUrl === message.id
-                            ? 'bg-blue-600 text-white'
-                            : 'bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200'
-                        }`}
-                      >
-                        <LinkIcon className="w-3 h-3" />
-                        引用外部图片
-                      </button>
-                      <button
-                        onClick={() => {
-                          const a = document.createElement('a');
-                          a.href = message.generatedImage!;
-                          a.download = `image-${message.id}.png`;
-                          a.click();
-                        }}
-                        className="flex items-center gap-1 px-3 py-1.5 text-xs bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
-                      >
-                        <Download className="w-3 h-3" />
-                        下载
-                      </button>
-                    </div>
-                    {/* 引用外部图片 URL 输入 */}
-                    {modifyRefImageUrl === message.id && (
-                      <div className="mb-2">
-                        <div className="flex items-center gap-1 mb-1">
-                          <LinkIcon className="w-3 h-3 text-blue-500" />
-                          <span className="text-xs text-blue-600">粘贴外部图片链接进行修改</span>
-                        </div>
-                        <div className="flex gap-2">
-                          <input
-                            type="text"
-                            value={refImageUrlInput}
-                            onChange={(e) => setRefImageUrlInput(e.target.value)}
-                            placeholder="粘贴图片 URL，如 https://example.com/image.jpg"
-                            className="flex-1 px-3 py-1.5 text-xs border border-blue-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400"
-                          />
+                      />
+                      <div className="p-3 bg-gray-50 border-t border-gray-200">
+                        <div className="flex gap-2 mb-2 flex-wrap">
                           <button
                             onClick={() => {
-                              if (!refImageUrlInput.trim()) return;
-                              // 将外部图片 URL 作为参考图，发起修改
-                              modifyImageAction(
-                                message.id,
-                                `参考图: ${refImageUrlInput.trim()}`,
-                                modifyInput.trim() || '根据参考图风格重新生成',
-                                (message.params?.style) || 'realistic',
-                                refImageUrlInput.trim(),
-                              );
-                              setRefImageUrlInput('');
-                              setModifyRefImageUrl(null);
+                              setModifyInputId(modifyInputId === message.id ? null : message.id);
+                              setModifyInput('');
                             }}
-                            disabled={!refImageUrlInput.trim()}
-                            className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+                            className="flex items-center gap-1 px-3 py-1.5 text-xs bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors"
                           >
-                            引用并生成
+                            <Wand2 className="w-3 h-3" />
+                            修改图片
+                          </button>
+                          {/* 引用外部图片链接进行修改 */}
+                          <button
+                            onClick={() => {
+                              setModifyInputId(modifyInputId === message.id ? null : message.id);
+                              setModifyInput('');
+                              setModifyRefImageUrl(modifyRefImageUrl === message.id ? null : message.id);
+                            }}
+                            className={`flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg transition-colors ${modifyRefImageUrl === message.id
+                              ? 'bg-blue-600 text-white'
+                              : 'bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200'
+                              }`}
+                          >
+                            <LinkIcon className="w-3 h-3" />
+                            引用外部图片
+                          </button>
+                          <button
+                            onClick={() => {
+                              const a = document.createElement('a');
+                              a.href = message.generatedImage!;
+                              a.download = `image-${message.id}.png`;
+                              a.click();
+                            }}
+                            className="flex items-center gap-1 px-3 py-1.5 text-xs bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+                          >
+                            <Download className="w-3 h-3" />
+                            下载
                           </button>
                         </div>
-                        {refImageUrlInput.trim() && /^https?:\/\/.*\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i.test(refImageUrlInput.trim()) && (
-                          <img
-                            src={refImageUrlInput.trim()}
-                            alt="预览"
-                            className="mt-2 w-24 h-24 object-cover rounded-lg border border-blue-200"
-                            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                          />
-                        )}
-                      </div>
-                    )}
-                    {modifyInputId === message.id && (
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          value={modifyInput}
-                          onChange={(e) => setModifyInput(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' && modifyInput.trim()) {
-                              modifyImageAction(message.id, message.originalPrompt || '', modifyInput.trim(), (message.params?.style) || 'realistic');
-                            }
-                          }}
-                          placeholder="输入你的修改需求，例如：把背景换成夜晚..."
-                          className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
-                        />
-                        <button
-                          onClick={() => modifyInput.trim() && modifyImageAction(message.id, message.originalPrompt || '', modifyInput.trim(), (message.params?.style) || 'realistic')}
-                          disabled={!modifyInput.trim()}
-                          className="px-4 py-2 text-sm bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-                        >
-                          发送
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {message.generatedVideo && (
-                <div className="mt-3 rounded-lg overflow-hidden border border-gray-200 result-reveal">
-                  <video
-                    src={message.generatedVideo}
-                    controls
-                    className="w-full max-h-64"
-                  />
-                  <div className="p-3 bg-gray-50 border-t border-gray-200">
-                    <div className="flex gap-2 mb-2">
-                      <button
-                        onClick={() => {
-                          setModifyInputId(modifyInputId === message.id ? null : message.id);
-                          setModifyInput('');
-                        }}
-                        className="flex items-center gap-1 px-3 py-1.5 text-xs bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors"
-                      >
-                        <Wand2 className="w-3 h-3" />
-                        修改视频
-                      </button>
-                      <button
-                        onClick={() => {
-                          const a = document.createElement('a');
-                          a.href = message.generatedVideo!;
-                          a.download = `video-${message.id}.mp4`;
-                          a.click();
-                        }}
-                        className="flex items-center gap-1 px-3 py-1.5 text-xs bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
-                      >
-                        <Download className="w-3 h-3" />
-                        下载
-                      </button>
-                    </div>
-                    {modifyInputId === message.id && (
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          value={modifyInput}
-                          onChange={(e) => setModifyInput(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' && modifyInput.trim()) {
-                              modifyVideoAction(message.id, message.originalPrompt || '', modifyInput.trim(), (message.params?.style) || 'realistic', (message.params?.duration) || '10');
-                            }
-                          }}
-                          placeholder="输入你的修改需求，例如：让画面更明亮，增加动态效果..."
-                          className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
-                        />
-                        <button
-                          onClick={() => modifyInput.trim() && modifyVideoAction(message.id, message.originalPrompt || '', modifyInput.trim(), (message.params?.style) || 'realistic', (message.params?.duration) || '10')}
-                          disabled={!modifyInput.trim()}
-                          className="px-4 py-2 text-sm bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-                        >
-                          发送
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* Agent 思考流程 — 默认展开展示每个 Agent 的思考过程 */}
-              {message.agentThoughts && message.agentThoughts.length > 0 && (
-                <div className="mt-3 border border-purple-200 rounded-xl overflow-hidden bg-white animate-scale-in">
-                  <div className="px-3 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border-b border-purple-100 flex items-center gap-2">
-                    <Brain className="w-4 h-4 text-purple-500" />
-                    <span className="text-xs font-semibold text-purple-700">AI 思考过程</span>
-                    <span className="text-[10px] text-purple-400 ml-auto">{message.agentThoughts.length} 个步骤</span>
-                  </div>
-                  <div className="p-3 space-y-2">
-                    {message.agentThoughts.map((thought, index) => {
-                      const isLast = index === message.agentThoughts!.length - 1;
-                      const isComplete = thought.action === 'script_generated' || thought.action === 'parameters_extracted';
-                      const stepColor = isComplete ? 'border-green-200 bg-green-50/50' : 'border-blue-200 bg-blue-50/50';
-                      const dotColor = isComplete ? 'bg-green-500' : 'bg-blue-500';
-                      const stepLabel = index === 0 ? '理解需求' : index === message.agentThoughts!.length - 1 ? '输出结果' : '分析处理';
-
-                      return (
-                        <div
-                          key={index}
-                          className="flex gap-2.5 thought-step"
-                          style={{ animationDelay: `${index * 80}ms` }}
-                        >
-                          {/* 左侧步骤指示器 */}
-                          <div className="flex flex-col items-center pt-0.5">
-                            <div className={`w-5 h-5 rounded-full ${dotColor} flex items-center justify-center text-white text-[10px] font-bold shadow-sm`}>
-                              {index + 1}
+                        {/* 引用外部图片 URL 输入 */}
+                        {modifyRefImageUrl === message.id && (
+                          <div className="mb-2">
+                            <div className="flex items-center gap-1 mb-1">
+                              <LinkIcon className="w-3 h-3 text-blue-500" />
+                              <span className="text-xs text-blue-600">粘贴外部图片链接进行修改</span>
                             </div>
-                            {!isLast && <div className="w-0.5 flex-1 min-h-[16px] bg-gradient-to-b from-gray-200 to-gray-100 my-0.5" />}
-                          </div>
-                          {/* 右侧步骤内容 */}
-                          <div className={`flex-1 p-2.5 rounded-lg border ${stepColor} transition-colors`}>
-                            <div className="flex items-center gap-1.5 mb-1">
-                              <span className={`px-1.5 py-0.5 text-[10px] rounded-full font-medium ${getAgentColor(thought.agentName)}`}>
-                                {thought.agentName}
-                              </span>
-                              <span className="text-[10px] text-gray-400">{stepLabel}</span>
+                            <div className="flex gap-2">
+                              <input
+                                type="text"
+                                value={refImageUrlInput}
+                                onChange={(e) => setRefImageUrlInput(e.target.value)}
+                                placeholder="粘贴图片 URL，如 https://example.com/image.jpg"
+                                className="flex-1 px-3 py-1.5 text-xs border border-blue-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400"
+                              />
+                              <button
+                                onClick={() => {
+                                  if (!refImageUrlInput.trim()) return;
+                                  // 将外部图片 URL 作为参考图，发起修改
+                                  modifyImageAction(
+                                    message.id,
+                                    `参考图: ${refImageUrlInput.trim()}`,
+                                    modifyInput.trim() || '根据参考图风格重新生成',
+                                    (message.params?.style) || 'realistic',
+                                    refImageUrlInput.trim(),
+                                  );
+                                  setRefImageUrlInput('');
+                                  setModifyRefImageUrl(null);
+                                }}
+                                disabled={!refImageUrlInput.trim()}
+                                className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+                              >
+                                引用并生成
+                              </button>
                             </div>
-                            <p className="text-xs text-gray-700 leading-relaxed">{thought.thought}</p>
-                            {thought.output && (
-                              <div className="mt-1.5 pt-1.5 border-t border-gray-100">
-                                <p className="text-[11px] text-gray-500 font-mono whitespace-pre-wrap break-all line-clamp-3">
-                                  {thought.output}
-                                </p>
-                              </div>
+                            {refImageUrlInput.trim() && /^https?:\/\/.*\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i.test(refImageUrlInput.trim()) && (
+                              <img
+                                src={refImageUrlInput.trim()}
+                                alt="预览"
+                                className="mt-2 w-24 h-24 object-cover rounded-lg border border-blue-200"
+                                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                              />
                             )}
                           </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* 🧠 推理模型的深度思考链（DeepSeek-R1 / GLM-Z1 的 chain-of-thought） */}
-              {message.reasoning && (
-                <div className="mt-3">
-                  <button
-                    onClick={() => toggleThoughts(`reasoning-${message.id}`)}
-                    className="flex items-center gap-1 text-xs text-amber-600 hover:text-amber-700 transition-colors font-medium"
-                  >
-                    {expandedThoughts.has(`reasoning-${message.id}`) ? (
-                      <>
-                        <ChevronUp className="w-4 h-4" />
-                        收起推理过程
-                      </>
-                    ) : (
-                      <>
-                        <ChevronDown className="w-4 h-4" />
-                        🧠 查看推理模型深度思考过程
-                      </>
-                    )}
-                  </button>
-
-                  {expandedThoughts.has(`reasoning-${message.id}`) && (
-                    <div className="mt-2 p-4 bg-gradient-to-br from-amber-50 to-orange-50 rounded-lg border border-amber-200">
-                      <div className="flex items-center gap-2 mb-3 pb-2 border-b border-amber-200">
-                        <div className="w-6 h-6 rounded-full bg-amber-500 flex items-center justify-center">
-                          <Brain className="w-3.5 h-3.5 text-white" />
-                        </div>
-                        <div>
-                          <span className="text-sm font-semibold text-amber-800">
-                            {message.modelUsed === 'reasoning' ? '推理模型 Chain-of-Thought' : 'AI 分析过程'}
-                          </span>
-                          <span className="ml-2 text-xs text-amber-500 font-mono">
-                            {message.modelUsed === 'reasoning' ? 'DeepSeek-R1 / GLM-Z1' : '指令模型'}
-                          </span>
-                        </div>
-                      </div>
-                      <div className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap max-h-80 overflow-y-auto font-mono text-xs">
-                        {formatReasoningDisplay(parseReasoningSteps(message.reasoning), message.modelUsed || 'reasoning')}
+                        )}
+                        {modifyInputId === message.id && (
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={modifyInput}
+                              onChange={(e) => setModifyInput(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' && modifyInput.trim()) {
+                                  modifyImageAction(message.id, message.originalPrompt || '', modifyInput.trim(), (message.params?.style) || 'realistic');
+                                }
+                              }}
+                              placeholder="输入你的修改需求，例如：把背景换成夜晚..."
+                              className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                            />
+                            <button
+                              onClick={() => modifyInput.trim() && modifyImageAction(message.id, message.originalPrompt || '', modifyInput.trim(), (message.params?.style) || 'realistic')}
+                              disabled={!modifyInput.trim()}
+                              className="px-4 py-2 text-sm bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+                            >
+                              发送
+                            </button>
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}
+
+                  {message.generatedVideo && (
+                    <div className="mt-3 rounded-lg overflow-hidden border border-gray-200 result-reveal">
+                      <video
+                        src={message.generatedVideo}
+                        controls
+                        className="w-full max-h-64"
+                        onError={(e) => {
+                          const video = e.target as HTMLVideoElement;
+                          video.style.display = 'none';
+                          if (video.nextElementSibling?.classList.contains('video-fallback')) return;
+                          const fallback = document.createElement('div');
+                          fallback.className = 'video-fallback w-full h-32 flex items-center justify-center text-gray-400 text-sm bg-gray-100';
+                          fallback.textContent = '视频已失效或已被清理';
+                          video.parentElement?.insertBefore(fallback, video.nextSibling);
+                        }}
+                      />
+                      <div className="p-3 bg-gray-50 border-t border-gray-200">
+                        <div className="flex gap-2 mb-2">
+                          <button
+                            onClick={() => {
+                              setModifyInputId(modifyInputId === message.id ? null : message.id);
+                              setModifyInput('');
+                            }}
+                            className="flex items-center gap-1 px-3 py-1.5 text-xs bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors"
+                          >
+                            <Wand2 className="w-3 h-3" />
+                            修改视频
+                          </button>
+                          <button
+                            onClick={() => {
+                              const a = document.createElement('a');
+                              a.href = message.generatedVideo!;
+                              a.download = `video-${message.id}.mp4`;
+                              a.click();
+                            }}
+                            className="flex items-center gap-1 px-3 py-1.5 text-xs bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+                          >
+                            <Download className="w-3 h-3" />
+                            下载
+                          </button>
+                        </div>
+                        {modifyInputId === message.id && (
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={modifyInput}
+                              onChange={(e) => setModifyInput(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' && modifyInput.trim()) {
+                                  modifyVideoAction(message.id, message.originalPrompt || '', modifyInput.trim(), (message.params?.style) || 'realistic', (message.params?.duration) || '10');
+                                }
+                              }}
+                              placeholder="输入你的修改需求，例如：让画面更明亮，增加动态效果..."
+                              className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                            />
+                            <button
+                              onClick={() => modifyInput.trim() && modifyVideoAction(message.id, message.originalPrompt || '', modifyInput.trim(), (message.params?.style) || 'realistic', (message.params?.duration) || '10')}
+                              disabled={!modifyInput.trim()}
+                              className="px-4 py-2 text-sm bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+                            >
+                              发送
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Agent 思考流程 — 默认展开展示每个 Agent 的思考过程 */}
+                  {message.agentThoughts && message.agentThoughts.length > 0 && (
+                    <div className="mt-3 border border-purple-200 rounded-xl overflow-hidden bg-white animate-scale-in">
+                      <div className="px-3 py-2 bg-gradient-to-r from-purple-50 to-indigo-50 border-b border-purple-100 flex items-center gap-2">
+                        <Brain className="w-4 h-4 text-purple-500" />
+                        <span className="text-xs font-semibold text-purple-700">AI 思考过程</span>
+                        <span className="text-[10px] text-purple-400 ml-auto">{message.agentThoughts.length} 个步骤</span>
+                      </div>
+                      <div className="p-3 space-y-2">
+                        {message.agentThoughts.map((thought, index) => {
+                          const isLast = index === message.agentThoughts!.length - 1;
+                          const isComplete = thought.action === 'script_generated' || thought.action === 'parameters_extracted';
+                          const stepColor = isComplete ? 'border-green-200 bg-green-50/50' : 'border-blue-200 bg-blue-50/50';
+                          const dotColor = isComplete ? 'bg-green-500' : 'bg-blue-500';
+                          const stepLabel = index === 0 ? '理解需求' : index === message.agentThoughts!.length - 1 ? '输出结果' : '分析处理';
+
+                          return (
+                            <div
+                              key={index}
+                              className="flex gap-2.5 thought-step"
+                              style={{ animationDelay: `${index * 80}ms` }}
+                            >
+                              {/* 左侧步骤指示器 */}
+                              <div className="flex flex-col items-center pt-0.5">
+                                <div className={`w-5 h-5 rounded-full ${dotColor} flex items-center justify-center text-white text-[10px] font-bold shadow-sm`}>
+                                  {index + 1}
+                                </div>
+                                {!isLast && <div className="w-0.5 flex-1 min-h-[16px] bg-gradient-to-b from-gray-200 to-gray-100 my-0.5" />}
+                              </div>
+                              {/* 右侧步骤内容 */}
+                              <div className={`flex-1 p-2.5 rounded-lg border ${stepColor} transition-colors`}>
+                                <div className="flex items-center gap-1.5 mb-1">
+                                  <span className={`px-1.5 py-0.5 text-[10px] rounded-full font-medium ${getAgentColor(thought.agentName)}`}>
+                                    {thought.agentName}
+                                  </span>
+                                  <span className="text-[10px] text-gray-400">{stepLabel}</span>
+                                </div>
+                                <p className="text-xs text-gray-700 leading-relaxed">{thought.thought}</p>
+                                {thought.output && (
+                                  <div className="mt-1.5 pt-1.5 border-t border-gray-100">
+                                    <p className="text-[11px] text-gray-500 font-mono whitespace-pre-wrap break-all line-clamp-3">
+                                      {thought.output}
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 🧠 推理模型的深度思考链（DeepSeek-R1 / GLM-Z1 的 chain-of-thought） */}
+                  {message.reasoning && (
+                    <div className="mt-3">
+                      <button
+                        onClick={() => toggleThoughts(`reasoning-${message.id}`)}
+                        className="flex items-center gap-1 text-xs text-amber-600 hover:text-amber-700 transition-colors font-medium"
+                      >
+                        {expandedThoughts.has(`reasoning-${message.id}`) ? (
+                          <>
+                            <ChevronUp className="w-4 h-4" />
+                            收起推理过程
+                          </>
+                        ) : (
+                          <>
+                            <ChevronDown className="w-4 h-4" />
+                            🧠 查看推理模型深度思考过程
+                          </>
+                        )}
+                      </button>
+
+                      {expandedThoughts.has(`reasoning-${message.id}`) && (
+                        <div className="mt-2 p-4 bg-gradient-to-br from-amber-50 to-orange-50 rounded-lg border border-amber-200">
+                          <div className="flex items-center gap-2 mb-3 pb-2 border-b border-amber-200">
+                            <div className="w-6 h-6 rounded-full bg-amber-500 flex items-center justify-center">
+                              <Brain className="w-3.5 h-3.5 text-white" />
+                            </div>
+                            <div>
+                              <span className="text-sm font-semibold text-amber-800">
+                                {message.modelUsed === 'reasoning' ? '推理模型 Chain-of-Thought' : 'AI 分析过程'}
+                              </span>
+                              <span className="ml-2 text-xs text-amber-500 font-mono">
+                                {message.modelUsed === 'reasoning' ? 'DeepSeek-R1 / GLM-Z1' : '指令模型'}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap max-h-80 overflow-y-auto font-mono text-xs">
+                            {formatReasoningDisplay(parseReasoningSteps(message.reasoning), message.modelUsed || 'reasoning')}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+          {isTyping && (
+            <div className="flex justify-start">
+              <div className="bg-white px-4 py-3 rounded-2xl rounded-bl-md shadow-sm">
+                <div className="flex gap-1">
+                  <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {showUploader && (
+            <div className="mt-4 bg-white p-4 rounded-xl shadow-sm border border-gray-200">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                  <Upload className="w-4 h-4" />
+                  上传图片制作视频
+                </h3>
+                <button
+                  onClick={() => setShowUploader(false)}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <ImageUploader
+                onImageUploaded={handleImageUploaded}
+                onGenerateVideo={handleGenerateVideoFromImage}
+              />
+            </div>
+          )}
+
+          <div ref={messagesEndRef} />
+        </div>
+
+        <div className="p-4 bg-white border-t border-gray-200">
+          {/* 任务进行中状态条 + 停止按钮 */}
+          {getPendingTasks().length > 0 && (
+            <div className="mb-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg flex items-center justify-between">
+              <div className="flex items-center gap-2 min-w-0">
+                <RefreshCw className="w-4 h-4 text-amber-500 animate-spin flex-shrink-0" />
+                <span className="text-sm text-amber-700 truncate">
+                  {getPendingTasks().length} 个任务进行中
+                  {getPendingTasks().some(t => t.actionType === 'video' && (t.progress || 0) > 0) && (
+                    <span> · 视频 {getPendingTasks().find(t => t.actionType === 'video' && (t.progress || 0) > 0)?.progress}%</span>
+                  )}
+                </span>
+              </div>
+              <button
+                onClick={handleStopCurrentTask}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-red-600 bg-white border border-red-200 rounded-lg hover:bg-red-50 transition-colors flex-shrink-0 ml-2"
+              >
+                <StopCircle className="w-4 h-4" />
+                停止
+              </button>
+            </div>
+          )}
+
+          {/* 多图附件缩略图预览 */}
+          {pendingAttachmentImages.length > 0 && (
+            <div className="mb-2 px-2 py-2 bg-purple-50 border border-purple-200 rounded-lg animate-slide-down">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-xs font-medium text-purple-700">
+                  📸 已附加 {pendingAttachmentImages.length} 张图片
+                </span>
+                <span className="text-xs text-purple-400">
+                  Agent 将综合分析这些图片和你的文字指令
+                </span>
+                <button
+                  onClick={clearAttachmentImages}
+                  className="ml-auto text-xs text-red-500 hover:underline"
+                >
+                  清空全部
+                </button>
+              </div>
+              <div className="flex gap-2 overflow-x-auto">
+                {pendingAttachmentImages.map((url, i) => (
+                  <div key={i} className="relative flex-shrink-0">
+                    <img
+                      src={url}
+                      alt={`附件 ${i + 1}`}
+                      className="w-16 h-16 rounded-lg object-cover border border-purple-300"
+                      onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                    />
+                    <span className="absolute top-0 left-0 w-5 h-5 bg-purple-600 text-white text-xs rounded-tl-lg rounded-br-lg flex items-center justify-center font-semibold">
+                      {i + 1}
+                    </span>
+                    <button
+                      onClick={() => removeAttachmentImage(i)}
+                      className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-red-500 text-white rounded-full flex items-center justify-center hover:bg-red-600 transition-colors"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* 图片 URL 输入区域（粘贴或手动输入链接） */}
+          {showImageUrlInput && (
+            <div className="mb-2 px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg animate-slide-down">
+              <div className="flex items-center gap-2">
+                <LinkIcon className="w-4 h-4 text-blue-500" />
+                <span className="text-xs font-medium text-blue-700">粘贴图片链接</span>
+                <span className="text-xs text-blue-400">支持 jpg/png/gif/webp/bmp</span>
+                <button
+                  onClick={() => { setShowImageUrlInput(false); setImageUrlInput(''); setUrlPreviewError(null); }}
+                  className="ml-auto text-xs text-gray-400 hover:text-gray-600"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <div className="flex gap-2 mt-2">
+                <input
+                  type="text"
+                  value={imageUrlInput}
+                  onChange={(e) => { setImageUrlInput(e.target.value); setUrlPreviewError(null); }}
+                  onKeyDown={handleImageUrlKeyDown}
+                  onPaste={handleInputPaste}
+                  placeholder="粘贴图片 URL，按 Enter 添加..."
+                  className="flex-1 px-3 py-1.5 text-sm border border-blue-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400"
+                  autoFocus
+                />
+                <button
+                  onClick={() => addImageByUrl(imageUrlInput)}
+                  disabled={!imageUrlInput.trim()}
+                  className={`px-3 py-1.5 text-sm rounded-lg font-medium transition-colors ${imageUrlInput.trim()
+                    ? 'bg-blue-600 text-white hover:bg-blue-700'
+                    : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                    }`}
+                >
+                  添加
+                </button>
+              </div>
+              {urlPreviewError && (
+                <p className="mt-1.5 text-xs text-red-500">{urlPreviewError}</p>
+              )}
+            </div>
+          )}
+
+          {/* 消息等待队列面板 */}
+          {messageQueue.length > 0 && (
+            <div className="mb-3 px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg animate-slide-down">
+              <div className="flex items-center gap-2 mb-2">
+                <Layers className="w-4 h-4 text-blue-500" />
+                <span className="text-sm font-medium text-blue-700">
+                  等待队列 ({messageQueue.length})
+                </span>
+                <span className="text-xs text-blue-400">
+                  当前任务完成后自动执行
+                </span>
+              </div>
+              <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                {messageQueue.map((item, index) => (
+                  <div
+                    key={item.id}
+                    className="flex items-center gap-2 px-2 py-1.5 bg-white rounded border border-blue-100 group"
+                  >
+                    <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 text-xs font-semibold flex items-center justify-center flex-shrink-0">
+                      {index + 1}
+                    </span>
+                    <span className="text-sm text-gray-600 truncate flex-1">{item.text}</span>
+                    <span className="text-xs text-gray-400 flex-shrink-0">
+                      {Math.floor((Date.now() - item.timestamp) / 1000) < 60
+                        ? '刚刚'
+                        : `${Math.floor((Date.now() - item.timestamp) / 60000)}分钟前`}
+                    </span>
+                    <button
+                      onClick={() => removeFromQueue(item.id)}
+                      className="p-1 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded opacity-0 group-hover:opacity-100 transition-all flex-shrink-0"
+                      title="移除此任务"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="flex gap-3">
+            <div className="flex gap-2">
+              {/* 多图附件按钮 — 支持多选，与文字一起发送 */}
+              <div className="relative group">
+                <input
+                  ref={multiFileInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  onChange={handleAttachmentFiles}
+                  className="hidden"
+                />
+                <button
+                  onClick={() => multiFileInputRef.current?.click()}
+                  className={`p-2 rounded-lg transition-colors ${pendingAttachmentImages.length > 0 ? 'text-purple-600 bg-purple-50' : 'text-gray-500 hover:text-purple-600 hover:bg-purple-50'
+                    }`}
+                  title="附加多张图片（可多选），与文字一起发送"
+                >
+                  <Image className="w-5 h-5" />
+                  {pendingAttachmentImages.length > 0 && (
+                    <span className="absolute -top-1 -right-1 w-4 h-4 bg-purple-600 text-white text-[10px] rounded-full flex items-center justify-center font-semibold">
+                      {pendingAttachmentImages.length}
+                    </span>
+                  )}
+                </button>
+                <div className="absolute -top-8 left-1/2 -translate-x-1/2 px-2 py-1 bg-gray-800 text-white text-xs rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
+                  多图+文字混合发送
+                </div>
+              </div>
+              {/* 粘贴图片链接按钮 */}
+              <div className="relative group">
+                <button
+                  onClick={() => setShowImageUrlInput(!showImageUrlInput)}
+                  className={`p-2 rounded-lg transition-colors ${showImageUrlInput ? 'text-blue-600 bg-blue-50' : 'text-gray-500 hover:text-blue-600 hover:bg-blue-50'
+                    }`}
+                  title="粘贴图片链接（支持 Ctrl+V 粘贴截图或图片 URL）"
+                >
+                  <LinkIcon className="w-5 h-5" />
+                </button>
+                <div className="absolute -top-8 left-1/2 -translate-x-1/2 px-2 py-1 bg-gray-800 text-white text-xs rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
+                  粘贴图片链接
+                </div>
+              </div>
+              <div className="relative group">
+                <button
+                  onClick={() => setShowUploader(!showUploader)}
+                  className={`p-2 rounded-lg transition-colors ${showUploader ? 'text-purple-600 bg-purple-50' : 'text-gray-500 hover:text-purple-600 hover:bg-purple-50'
+                    }`}
+                >
+                  <Upload className="w-5 h-5" />
+                </button>
+                <div className="absolute -top-8 left-1/2 -translate-x-1/2 px-2 py-1 bg-gray-800 text-white text-xs rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
+                  上传图片制作视频
+                </div>
+              </div>
+            </div>
+            <div className="flex-1 relative">
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+                onPaste={handleInputPaste}
+                placeholder={
+                  abortCooldown > 0
+                    ? `任务终止冷却中，请等待 ${abortCooldown} 秒...`
+                    : '输入需求，或 Ctrl+V 粘贴截图/图片链接...'
+                }
+                className={`w-full px-4 py-2.5 border-none rounded-full focus:outline-none focus:ring-2 transition-all ${abortCooldown > 0
+                  ? 'bg-orange-50 focus:ring-orange-400 text-gray-400'
+                  : 'bg-gray-100 focus:ring-purple-500'
+                  }`}
+                disabled={abortCooldown > 0}
+              />
+              {abortCooldown > 0 && (
+                <div className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-medium text-orange-500">
+                  {abortCooldown}s
                 </div>
               )}
             </div>
-          </div>
-          );
-        })}
-        {isTyping && (
-          <div className="flex justify-start">
-            <div className="bg-white px-4 py-3 rounded-2xl rounded-bl-md shadow-sm">
-              <div className="flex gap-1">
-                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-              </div>
-            </div>
-          </div>
-        )}
-        
-        {showUploader && (
-          <div className="mt-4 bg-white p-4 rounded-xl shadow-sm border border-gray-200">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-sm font-medium text-gray-700 flex items-center gap-2">
-                <Upload className="w-4 h-4" />
-                上传图片制作视频
-              </h3>
-              <button 
-                onClick={() => setShowUploader(false)}
-                className="text-gray-400 hover:text-gray-600"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <ImageUploader 
-              onImageUploaded={handleImageUploaded}
-              onGenerateVideo={handleGenerateVideoFromImage}
-            />
-          </div>
-        )}
-        
-        <div ref={messagesEndRef} />
-      </div>
-
-      <div className="p-4 bg-white border-t border-gray-200">
-        {/* 任务进行中状态条 + 停止按钮 */}
-        {getPendingTasks().length > 0 && (
-          <div className="mb-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg flex items-center justify-between">
-            <div className="flex items-center gap-2 min-w-0">
-              <RefreshCw className="w-4 h-4 text-amber-500 animate-spin flex-shrink-0" />
-              <span className="text-sm text-amber-700 truncate">
-                {getPendingTasks().length} 个任务进行中
-                {getPendingTasks().some(t => t.actionType === 'video' && (t.progress || 0) > 0) && (
-                  <span> · 视频 {getPendingTasks().find(t => t.actionType === 'video' && (t.progress || 0) > 0)?.progress}%</span>
-                )}
-              </span>
-            </div>
             <button
-              onClick={handleStopCurrentTask}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-red-600 bg-white border border-red-200 rounded-lg hover:bg-red-50 transition-colors flex-shrink-0 ml-2"
-            >
-              <StopCircle className="w-4 h-4" />
-              停止
-            </button>
-          </div>
-        )}
-
-        {/* 多图附件缩略图预览 */}
-        {pendingAttachmentImages.length > 0 && (
-          <div className="mb-2 px-2 py-2 bg-purple-50 border border-purple-200 rounded-lg animate-slide-down">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs font-medium text-purple-700">
-                📸 已附加 {pendingAttachmentImages.length} 张图片
-              </span>
-              <span className="text-xs text-purple-400">
-                Agent 将综合分析这些图片和你的文字指令
-              </span>
-              <button
-                onClick={clearAttachmentImages}
-                className="ml-auto text-xs text-red-500 hover:underline"
-              >
-                清空全部
-              </button>
-            </div>
-            <div className="flex gap-2 overflow-x-auto">
-              {pendingAttachmentImages.map((url, i) => (
-                <div key={i} className="relative flex-shrink-0">
-                  <img
-                    src={url}
-                    alt={`附件 ${i + 1}`}
-                    className="w-16 h-16 rounded-lg object-cover border border-purple-300"
-                  />
-                  <span className="absolute top-0 left-0 w-5 h-5 bg-purple-600 text-white text-xs rounded-tl-lg rounded-br-lg flex items-center justify-center font-semibold">
-                    {i + 1}
-                  </span>
-                  <button
-                    onClick={() => removeAttachmentImage(i)}
-                    className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-red-500 text-white rounded-full flex items-center justify-center hover:bg-red-600 transition-colors"
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* 图片 URL 输入区域（粘贴或手动输入链接） */}
-        {showImageUrlInput && (
-          <div className="mb-2 px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg animate-slide-down">
-            <div className="flex items-center gap-2">
-              <LinkIcon className="w-4 h-4 text-blue-500" />
-              <span className="text-xs font-medium text-blue-700">粘贴图片链接</span>
-              <span className="text-xs text-blue-400">支持 jpg/png/gif/webp/bmp</span>
-              <button
-                onClick={() => { setShowImageUrlInput(false); setImageUrlInput(''); setUrlPreviewError(null); }}
-                className="ml-auto text-xs text-gray-400 hover:text-gray-600"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-            <div className="flex gap-2 mt-2">
-              <input
-                type="text"
-                value={imageUrlInput}
-                onChange={(e) => { setImageUrlInput(e.target.value); setUrlPreviewError(null); }}
-                onKeyDown={handleImageUrlKeyDown}
-                onPaste={handleInputPaste}
-                placeholder="粘贴图片 URL，按 Enter 添加..."
-                className="flex-1 px-3 py-1.5 text-sm border border-blue-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400"
-                autoFocus
-              />
-              <button
-                onClick={() => addImageByUrl(imageUrlInput)}
-                disabled={!imageUrlInput.trim()}
-                className={`px-3 py-1.5 text-sm rounded-lg font-medium transition-colors ${
-                  imageUrlInput.trim()
-                    ? 'bg-blue-600 text-white hover:bg-blue-700'
-                    : 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                }`}
-              >
-                添加
-              </button>
-            </div>
-            {urlPreviewError && (
-              <p className="mt-1.5 text-xs text-red-500">{urlPreviewError}</p>
-            )}
-          </div>
-        )}
-
-        {/* 消息等待队列面板 */}
-        {messageQueue.length > 0 && (
-          <div className="mb-3 px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg animate-slide-down">
-            <div className="flex items-center gap-2 mb-2">
-              <Layers className="w-4 h-4 text-blue-500" />
-              <span className="text-sm font-medium text-blue-700">
-                等待队列 ({messageQueue.length})
-              </span>
-              <span className="text-xs text-blue-400">
-                当前任务完成后自动执行
-              </span>
-            </div>
-            <div className="space-y-1.5 max-h-32 overflow-y-auto">
-              {messageQueue.map((item, index) => (
-                <div
-                  key={item.id}
-                  className="flex items-center gap-2 px-2 py-1.5 bg-white rounded border border-blue-100 group"
-                >
-                  <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 text-xs font-semibold flex items-center justify-center flex-shrink-0">
-                    {index + 1}
-                  </span>
-                  <span className="text-sm text-gray-600 truncate flex-1">{item.text}</span>
-                  <span className="text-xs text-gray-400 flex-shrink-0">
-                    {Math.floor((Date.now() - item.timestamp) / 1000) < 60
-                      ? '刚刚'
-                      : `${Math.floor((Date.now() - item.timestamp) / 60000)}分钟前`}
-                  </span>
-                  <button
-                    onClick={() => removeFromQueue(item.id)}
-                    className="p-1 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded opacity-0 group-hover:opacity-100 transition-all flex-shrink-0"
-                    title="移除此任务"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <div className="flex gap-3">
-          <div className="flex gap-2">
-            {/* 多图附件按钮 — 支持多选，与文字一起发送 */}
-            <div className="relative group">
-              <input
-                ref={multiFileInputRef}
-                type="file"
-                accept="image/*"
-                multiple
-                onChange={handleAttachmentFiles}
-                className="hidden"
-              />
-              <button
-                onClick={() => multiFileInputRef.current?.click()}
-                className={`p-2 rounded-lg transition-colors ${
-                  pendingAttachmentImages.length > 0 ? 'text-purple-600 bg-purple-50' : 'text-gray-500 hover:text-purple-600 hover:bg-purple-50'
-                }`}
-                title="附加多张图片（可多选），与文字一起发送"
-              >
-                <Image className="w-5 h-5" />
-                {pendingAttachmentImages.length > 0 && (
-                  <span className="absolute -top-1 -right-1 w-4 h-4 bg-purple-600 text-white text-[10px] rounded-full flex items-center justify-center font-semibold">
-                    {pendingAttachmentImages.length}
-                  </span>
-                )}
-              </button>
-              <div className="absolute -top-8 left-1/2 -translate-x-1/2 px-2 py-1 bg-gray-800 text-white text-xs rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
-                多图+文字混合发送
-              </div>
-            </div>
-            {/* 粘贴图片链接按钮 */}
-            <div className="relative group">
-              <button
-                onClick={() => setShowImageUrlInput(!showImageUrlInput)}
-                className={`p-2 rounded-lg transition-colors ${
-                  showImageUrlInput ? 'text-blue-600 bg-blue-50' : 'text-gray-500 hover:text-blue-600 hover:bg-blue-50'
-                }`}
-                title="粘贴图片链接（支持 Ctrl+V 粘贴截图或图片 URL）"
-              >
-                <LinkIcon className="w-5 h-5" />
-              </button>
-              <div className="absolute -top-8 left-1/2 -translate-x-1/2 px-2 py-1 bg-gray-800 text-white text-xs rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
-                粘贴图片链接
-              </div>
-            </div>
-            <div className="relative group">
-              <button
-                onClick={() => setShowUploader(!showUploader)}
-                className={`p-2 rounded-lg transition-colors ${
-                  showUploader ? 'text-purple-600 bg-purple-50' : 'text-gray-500 hover:text-purple-600 hover:bg-purple-50'
-                }`}
-              >
-                <Upload className="w-5 h-5" />
-              </button>
-              <div className="absolute -top-8 left-1/2 -translate-x-1/2 px-2 py-1 bg-gray-800 text-white text-xs rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
-                上传图片制作视频
-              </div>
-            </div>
-          </div>
-          <div className="flex-1 relative">
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-              onPaste={handleInputPaste}
-              placeholder={
-                abortCooldown > 0
-                  ? `任务终止冷却中，请等待 ${abortCooldown} 秒...`
-                  : '输入需求，或 Ctrl+V 粘贴截图/图片链接...'
-              }
-              className={`w-full px-4 py-2.5 border-none rounded-full focus:outline-none focus:ring-2 transition-all ${
-                abortCooldown > 0
-                  ? 'bg-orange-50 focus:ring-orange-400 text-gray-400'
-                  : 'bg-gray-100 focus:ring-purple-500'
-              }`}
-              disabled={abortCooldown > 0}
-            />
-            {abortCooldown > 0 && (
-              <div className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-medium text-orange-500">
-                {abortCooldown}s
-              </div>
-            )}
-          </div>
-          <button
-            onClick={handleSend}
-            disabled={!input.trim() || abortCooldown > 0}
-            className={`p-2.5 rounded-full transition-all duration-200 ${
-              input.trim() && abortCooldown === 0
+              onClick={handleSend}
+              disabled={!input.trim() || abortCooldown > 0}
+              className={`p-2.5 rounded-full transition-all duration-200 ${input.trim() && abortCooldown === 0
                 ? 'bg-purple-600 text-white hover:bg-purple-700 hover:scale-105 active:scale-95 animate-glow'
                 : 'bg-gray-200 text-gray-400 cursor-not-allowed'
-            }`}
-          >
-            <Send className="w-5 h-5" />
-          </button>
-        </div>
-        <div className="flex items-center justify-center gap-4 mt-2">
-          <div className="flex items-center gap-1 text-xs text-gray-400">
-            <Users className="w-3 h-3" />
-            <span>多Agent协作</span>
+                }`}
+            >
+              <Send className="w-5 h-5" />
+            </button>
           </div>
-          <div className="flex items-center gap-1 text-xs text-gray-400">
-            <Eye className="w-3 h-3" />
-            <span>可查看思考流程</span>
+          <div className="flex items-center justify-center gap-4 mt-2">
+            <div className="flex items-center gap-1 text-xs text-gray-400">
+              <Users className="w-3 h-3" />
+              <span>多Agent协作</span>
+            </div>
+            <div className="flex items-center gap-1 text-xs text-gray-400">
+              <Eye className="w-3 h-3" />
+              <span>可查看思考流程</span>
+            </div>
           </div>
         </div>
-      </div>
       </div>
 
       {/* 未完成任务提示模态框 */}
@@ -3543,9 +3555,9 @@ export default function AIAssistant() {
                 <RefreshCw className="w-5 h-5 text-orange-500" />
               )}
               <h3 className="text-base font-semibold text-gray-800">
-                {pendingModalMode === 'stop' ? '停止当前任务' 
-                 : pendingModalMode === 'timeout' ? '任务执行时间较长'
-                 : '检测到未完成的任务'}
+                {pendingModalMode === 'stop' ? '停止当前任务'
+                  : pendingModalMode === 'timeout' ? '任务执行时间较长'
+                    : '检测到未完成的任务'}
               </h3>
             </div>
             <div className="px-5 py-4 space-y-3 max-h-64 overflow-y-auto">

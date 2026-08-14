@@ -67,6 +67,7 @@ import { getConcurrencyStats } from './services/concurrencyService.js'
 import { cleanupExpiredCheckpoints } from './services/checkpointService.js'
 import { initializeExperiencePool, flushExperiencePool } from './services/globalExperiencePool.js'
 import externalRoutes from './routes/external.js'
+import localLlmRoutes from './routes/localLlm.js'
 
 // for esm mode
 const __filename = fileURLToPath(import.meta.url)
@@ -139,6 +140,7 @@ app.use('/api/social', socialMediaRoutes)
 app.use('/api/office', officeRoutes)
 app.use('/api/video-edit', videoEditRoutes)
 app.use('/api/external', externalRoutes)
+app.use('/api/local-llm', localLlmRoutes)
 
 // A2A Agent Card 发现端点（无需 /api 前缀，符合 A2A 规范）
 app.use(a2aRoutes)

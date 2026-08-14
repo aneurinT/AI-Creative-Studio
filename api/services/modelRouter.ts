@@ -86,15 +86,15 @@ export function routeModel(
     case 'medium':
       return {
         tier: 'small',
-        model: 'glm-4-flash',
-        reason: '中等复杂度，使用快速小模型',
-        useLocalFirst: false,
+        model: process.env.LOCAL_LLM_ENABLED === 'true' ? 'local-qwen3-4b' : 'glm-4-flash',
+        reason: '中等复杂度，使用本地/云端小模型',
+        useLocalFirst: process.env.LOCAL_LLM_ENABLED === 'true',
         estimatedTokens: 200,
       };
     case 'complex':
       return {
         tier: 'large',
-        model: 'deepseek-v4-pro',
+        model: process.env.LOCAL_LLM_ENABLED === 'true' ? 'local-qwen3-4b' : 'deepseek-v4-pro',
         reason: `复杂任务(${historyLength}轮上下文)，使用深度推理模型`,
         useLocalFirst: false,
         estimatedTokens: 1000,
