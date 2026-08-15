@@ -59,6 +59,7 @@
 | 🔧 **MCP 协议** | 8 个标准化工具，支持 MCP `tools/list` 和 `tools/call` |
 | ✅ **审核机制** | 三级审核（脚本 → 参数 → 最终结果）+ 自学习记忆 |
 | 🧭 **智能模型路由** | 4 级路由（local/small/large/vision），6 维度自动决策 |
+| 🏠 **本地 LLM 推理** | Qwen3-4B GGUF 量化模型，node-llama-cpp v3，4 个 Agent 全接入，本地优先→云端降级 |
 
 ### 企业级特性
 
@@ -111,6 +112,10 @@
 │  ┌──────────┐ ┌──────────┐ ┌───────────────────────┐  │
 │  │ 模型路由  │ │ 协同服务  │ │ 高并发保护             │  │
 │  │4 级路由  │ │ 房间/锁  │ │ 限流/熔断/超时         │  │
+│  └──────────┘ └──────────┘ └───────────────────────┘  │
+│  ┌──────────┐ ┌──────────┐ ┌───────────────────────┐  │
+│  │ 本地LLM  │ │ 加载锁   │ │ 推理串行队列           │  │
+│  │Qwen3-4B  │ │ Promise  │ │ inferenceChain        │  │
 │  └──────────┘ └──────────┘ └───────────────────────┘  │
 │  ┌──────────┐ ┌──────────┐ ┌───────────────────────┐  │
 │  │ 链路追踪  │ │ 推理后端  │ │ 社交媒体发布           │  │
@@ -196,6 +201,9 @@ pnpm client:dev
 | `pnpm dist` | 构建前端 + 打包后端发布包 |
 | `pnpm check` | TypeScript 类型检查 |
 | `pnpm lint` | ESLint 代码检查 |
+| `pnpm llm` | 本地 LLM 交互式管理（状态/加载/对话） |
+| `pnpm llm:test` | 本地 LLM 批量测试（6 场景评估） |
+| `pnpm download-models` | 下载 GGUF 量化模型文件 |
 
 ---
 
@@ -260,6 +268,7 @@ aiProject/
 │   │   ├── socialMediaService.ts # 社交媒体发布（OAuth + 重试 + 熔断）
 │   │   ├── scheduledPublishService.ts # 定时发布调度（DB 持久化）
 │   │   ├── videoEditService.ts   # AI 视频剪辑（字幕/配音/片段替换）
+│   │   ├── localLlmService.ts    # 本地 LLM 推理服务（node-llama-cpp v3 + GGUF）
 │   │   ├── officeService.ts      # 办公工具 Webhook（钉钉/飞书/企微）
 │   │   ├── checkpointService.ts  # 检查点服务
 │   │   ├── fetchUtils.ts         # HTTP 请求工具
@@ -278,6 +287,10 @@ aiProject/
 │   ├── middleware/
 │   │   ├── auth.ts               # JWT 鉴权中间件
 │   │   └── trace.ts              # 链路追踪中间件（traceId 注入）
+│   ├── scripts/                  # 工具脚本
+│   │   ├── download-gguf-models.mjs # GGUF 模型下载（ModelScope/HF）
+│   │   ├── start-local-llm.mjs   # 本地 LLM 一键启动管理工具
+│   │   └── test-local-llm-batch.mjs # 本地 LLM 批量测试框架
 │   └── data/                     # 数据存储（运行时生成）
 │       ├── *.json                # JSON 模式数据文件（DB_MODE=json）
 │       ├── app.db                # SQLite 数据库（DB_MODE=sqlite）
@@ -371,6 +384,16 @@ aiProject/
 | POST | `/api/agents/video/analyze` | 视频参数分析 | ❌ |
 | POST | `/api/agents/image/analyze` | 图像参数分析 | ❌ |
 | POST | `/api/agents/video/generate` | 视频生成 | ❌ |
+| POST | `/api/agents/video/edit` | 视频剪辑方案分析 | ❌ |
+
+### 本地 LLM 管理
+
+| 方法 | 路径 | 说明 | 鉴权 |
+|------|------|------|:---:|
+| GET | `/api/local-llm/status` | 本地模型状态（已加载/文件存在/显存） | ❌ |
+| POST | `/api/local-llm/load` | 加载指定模型到内存 | ❌ |
+| POST | `/api/local-llm/unload` | 卸载模型释放内存 | ❌ |
+| POST | `/api/local-llm/generate` | 直接调用本地模型推理 | ❌ |
 
 ### 图片生成
 
@@ -536,8 +559,34 @@ aiProject/
   └─ 4. 执行 Agent
          ├─ StoryWriter（故事创作 → 视频脚本）
          ├─ VideoMaker（参数提取 → 分镜生成，单段 ≤18 秒）
-         └─ ImageCreator（图像参数 → prompt 优化）
+         ├─ ImageCreator（图像参数 → prompt 优化）
+         └─ VideoEditor（剪辑方案 → action/params）
 ```
+
+### 本地 LLM 优先策略
+
+所有 4 个执行 Agent 均采用 **本地优先 → 云端降级** 双通道：
+
+```
+Agent 请求
+  │
+  ├─ 1. 本地模型优先（Qwen3-4B GGUF, ~30-80s/次）
+  │      ├─ 少样本提示 + 关键词预翻译注入 + 相关性校验
+  │      ├─ 成功 → 直接返回（modelUsed: local-qwen3-4b）
+  │      └─ 失败 → 降级到云端
+  │
+  └─ 2. 云端 API 降级（通过 llmQueue + 熔断器保护）
+         ├─ DeepSeek-V4-Pro / GLM-Z1（推理模型）
+         ├─ GLM-4-Flash（指令模型）
+         └─ 熔断时 → 本地模板兜底
+```
+
+| Agent | 本地处理函数 | 输出格式 |
+|-------|-------------|---------|
+| StoryWriter | `callLocalLlmForStoryWrite` | JSON 数组分场景脚本 |
+| VideoMaker | `callLocalLlmForVideoAnalysis` | JSON prompt+style+duration |
+| ImageCreator | `callLocalLlmForImageAnalysis` | JSON prompt+style+composition |
+| VideoEditor | `callLocalLlmForVideoEdit` | JSON action+params+analysis |
 
 ### 每个 Agent 的上下文构建
 
@@ -660,8 +709,10 @@ toolRegistry.register({
 ## 🛡️ 高并发保护
 
 - 滑动窗口限流（全局 200 req/min，LLM 20 req/min）
-- LLM 调用队列（排队等待）
-- 熔断器（连续失败自动熔断）
+- LLM 调用队列（`llmQueue`，maxConcurrent=3，排队超时 60s）
+- 熔断器（`llmCircuitBreaker`，连续失败 5 次熔断，30s 恢复）
+- 本地模型加载锁（`loadingPromises`，并发请求共享同一次加载）
+- 本地推理串行队列（`inferenceChain`，避免 node-llama-cpp 序列竞争）
 - 请求超时保护（60 秒）
 - 连接追踪
 
@@ -730,6 +781,11 @@ DB_MODE=json                                  # json（默认）| sqlite（生�
 INFERENCE_DEFAULT_BACKEND=ltx                 # 默认推理后端：ltx | svd（未来）
 LTX_ENABLED=true                              # 是否启用 LTX 后端
 
+# 本地 LLM 推理（Qwen3-4B GGUF, node-llama-cpp v3）
+LOCAL_LLM_ENABLED=true                        # 是否启用本地模型优先
+LLM_USE_CPU=true                              # 强制 CPU 推理（无 GPU 时）
+MODELSCOPE_HOME=./data/modelscope_home        # ModelScope 缓存目录
+
 # 社交媒体集成（可选）
 DOUYIN_CLIENT_KEY=your_douyin_key             # 抖音开放平台
 KUAISHOU_CLIENT_KEY=your_kuaishou_key         # 快手开放平台
@@ -749,7 +805,7 @@ XIAOHONGSHU_CLIENT_KEY=your_xhs_key           # 小红书开放平台
 | **路由文件** | 22 个 |
 | **服务文件** | 30+ 个 |
 | **Agent 数量** | 5 个 + 1 编排器 |
-| **AI 模型引擎** | 8 个 |
+| **AI 模型引擎** | 8 个云端 + 1 个本地（Qwen3-4B） |
 | **MCP 工具** | 8 个 |
 | **数据库表** | 13 张（JSON/SQLite 双模式） |
 | **推理后端** | 可插拔（LTX 已实现，SVD 可扩展） |
@@ -759,6 +815,16 @@ XIAOHONGSHU_CLIENT_KEY=your_xhs_key           # 小红书开放平台
 ---
 
 ## 📝 更新日志
+
+### v2.2 (2026-08) — 本地 LLM 推理集成
+
+- 🏠 **本地 LLM 推理服务**：Qwen3-4B GGUF 量化模型（2.3GB），node-llama-cpp v3 引擎，CPU/GPU 混合推理
+- 🤖 **4 个 Agent 全接入本地模型**：StoryWriter / VideoMaker / ImageCreator / VideoEditor 均采用本地优先→云端降级策略
+- 🎯 **相关性校验机制**：84 条中文→英文关键词词典，预翻译注入提示词，`checkRelevance` 函数过滤幻觉输出（阈值 0.4）
+- 🔒 **加载锁优化**：`loadingPromises` Map 让并发请求共享同一次模型加载，消除重复加载（3 次→1 次，省 22s）
+- 🔗 **推理串行队列**：`inferenceChain` 链式 Promise，解决 node-llama-cpp 序列竞争（"No sequences left" + "DisposedError"）
+- 🛡️ **llmQueue 队列启用**：`callReasoningAgent` / `callHermesWithContext` 通过 `llmQueue.enqueue()` + `llmCircuitBreaker.call()` 包裹云端 API 调用
+- 🔧 **一键管理工具**：`pnpm llm` 交互式管理、`pnpm llm:test` 批量测试、`pnpm download-models` 模型下载
 
 ### v2.1 (2026-08) — 架构与性能优化
 

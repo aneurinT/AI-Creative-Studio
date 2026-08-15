@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '@/contexts/AuthContext'
 
@@ -6,17 +6,23 @@ export default function Login() {
   const { user, login, register } = useAuth()
   const navigate = useNavigate()
 
-  // 已登录用户直接跳转主页
-  if (user) {
-    navigate('/', { replace: true })
-    return null
-  }
   const [isRegister, setIsRegister] = useState(false)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [displayName, setDisplayName] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+
+  // 已登录用户跳转主页（在 useEffect 中执行，避免渲染期间更新状态）
+  useEffect(() => {
+    if (user) {
+      navigate('/', { replace: true })
+    }
+  }, [user, navigate])
+
+  if (user) {
+    return null
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()

@@ -30,41 +30,83 @@ const MODELS = {
     sizeGb: 0.61,
   },
   'qwen3-4b': {
-    displayName: 'Qwen3-4B-Instruct (Q4_K_M)',
+    displayName: 'Qwen3-4B-Instruct-2507 (Q4_K_M)',
     source: 'huggingface',
-    repo: 'lmstudio-community/Qwen3-4B-Instruct-GGUF',
-    file: 'qwen3-4b-instruct-q4_k_m.gguf',
+    repo: 'unsloth/Qwen3-4B-Instruct-2507-GGUF',
+    file: 'Qwen3-4B-Instruct-2507-Q4_K_M.gguf',
     destFile: 'qwen3-4b-instruct-q4_k_m.gguf',
-    sizeGb: 2.5,
+    sizeGb: 2.3,
   },
 };
 
 async function downloadFromModelScope(repo, file, destPath) {
-  const cloneDir = path.join(MODELS_DIR, '_modelscope_clone');
+  const https = await import('https');
 
-  // 清理旧的克隆
-  fs.rmSync(cloneDir, { recursive: true, force: true });
+  // ModelScope 文件下载 API
+  const url = `https://www.modelscope.cn/api/v1/models/${repo}/repo?Revision=master&FilePath=${encodeURIComponent(file)}`;
 
-  console.log('  克隆仓库 (git clone)...');
-  const cloneUrl = `https://www.modelscope.cn/${repo}.git`;
+  console.log(`  URL: ${url}`);
 
-  try {
-    execSync(`git clone --depth 1 ${cloneUrl} "${cloneDir}"`, {
-      stdio: 'inherit',
-      timeout: 300000,
-      cwd: MODELS_DIR,
-    });
+  return new Promise((resolve, reject) => {
+    let currentUrl = url;
+    let redirectCount = 0;
 
-    const srcFile = path.join(cloneDir, file);
-    if (!fs.existsSync(srcFile)) {
-      throw new Error(`文件 ${file} 不在仓库中`);
+    function doDownload() {
+      const req = https.get(currentUrl, { timeout: 600000 }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          redirectCount++;
+          if (redirectCount > 10) {
+            reject(new Error('重定向次数过多'));
+            return;
+          }
+          currentUrl = res.headers.location;
+          res.resume();
+          doDownload();
+          return;
+        }
+
+        if (res.statusCode !== 200) {
+          reject(new Error(`HTTP ${res.statusCode}`));
+          return;
+        }
+
+        const totalSize = parseInt(res.headers['content-length'] || '0', 10);
+        let downloaded = 0;
+        const outFile = fs.createWriteStream(destPath);
+
+        res.on('data', (chunk) => {
+          downloaded += chunk.length;
+          if (totalSize > 0) {
+            const pct = ((downloaded / totalSize) * 100).toFixed(1);
+            process.stdout.write(`\r  进度: ${pct}% (${(downloaded / 1024 / 1024).toFixed(1)}MB / ${(totalSize / 1024 / 1024).toFixed(1)}MB)`);
+          } else {
+            process.stdout.write(`\r  已下载: ${(downloaded / 1024 / 1024).toFixed(1)}MB`);
+          }
+        });
+
+        res.pipe(outFile);
+
+        outFile.on('finish', () => {
+          outFile.close();
+          console.log('');
+          resolve();
+        });
+
+        outFile.on('error', (err) => {
+          fs.unlink(destPath, () => { });
+          reject(err);
+        });
+      });
+
+      req.on('error', reject);
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error('请求超时'));
+      });
     }
 
-    fs.copyFileSync(srcFile, destPath);
-    console.log('  复制完成');
-  } finally {
-    fs.rmSync(cloneDir, { recursive: true, force: true });
-  }
+    doDownload();
+  });
 }
 
 async function downloadFromHuggingFace(repo, file, destPath) {

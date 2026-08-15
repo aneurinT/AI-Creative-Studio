@@ -9,6 +9,8 @@ import { analyzeImageWithText } from '../services/imageService.js';
 import { supervisorRoute } from '../services/modelRouter.js';
 import { videoEditService, type EditOperation, type EditParams } from '../services/videoEditService.js';
 import { createTrace, finishTrace } from '../services/tracing.js';
+import { localLlmService } from '../services/localLlmService.js';
+import { llmQueue, llmCircuitBreaker } from '../services/concurrencyService.js';
 
 const execAsync = promisify(exec);
 const router = Router();
@@ -205,57 +207,66 @@ async function callReasoningAgent(
   }
   contextMessages.push({ role: 'user', content: `用户需求：${message}\n\n请深度理解这个任务的真正意图，不要被表面文字限制。如果对话历史中有多个相关的创作请求，请智能融合它们的核心元素。结合上下文关联分析，自由拆解任务，给出你最专业的分析和输出。` });
 
-  // 尝试 DeepSeek-R1
-  const r1Key = getReasoningApiKey();
-  if (r1Key) {
-    try {
-      const response = await fetch(REASONING_API, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${r1Key}` },
-        body: JSON.stringify({ model: REASONING_MODEL, messages: contextMessages, temperature: 0.7, max_tokens: 4000 }),
-        signal: AbortSignal.timeout(90000),
-      });
-      if (response.ok) {
-        const data = await response.json() as any;
-        const msg = data.choices?.[0]?.message;
-        const reasoning = msg?.reasoning_content || '';
-        const content = msg?.content?.trim();
-        if (content) {
-          console.log(`[ReasoningAgent] DeepSeek-R1 analysis: ${reasoning.substring(0, 150)}...`);
-          return { content, reasoning };
+  // 通过 llmQueue 排队 + 熔断器保护执行云端 API 调用
+  return llmQueue.enqueue(
+    `reasoning-${sessionId}-${Date.now()}`,
+    () => llmCircuitBreaker.call(
+      async () => {
+        // 尝试 DeepSeek-R1
+        const r1Key = getReasoningApiKey();
+        if (r1Key) {
+          try {
+            const response = await fetch(REASONING_API, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${r1Key}` },
+              body: JSON.stringify({ model: REASONING_MODEL, messages: contextMessages, temperature: 0.7, max_tokens: 4000 }),
+              signal: AbortSignal.timeout(90000),
+            });
+            if (response.ok) {
+              const data = await response.json() as any;
+              const msg = data.choices?.[0]?.message;
+              const reasoning = msg?.reasoning_content || '';
+              const content = msg?.content?.trim();
+              if (content) {
+                console.log(`[ReasoningAgent] DeepSeek-R1 analysis: ${reasoning.substring(0, 150)}...`);
+                return { content, reasoning };
+              }
+            }
+          } catch (e) {
+            console.warn('[ReasoningAgent] DeepSeek-R1 failed:', (e as Error).message);
+          }
         }
-      }
-    } catch (e) {
-      console.warn('[ReasoningAgent] DeepSeek-R1 failed:', (e as Error).message);
-    }
-  }
 
-  // 降级到 GLM-Z1
-  const z1Key = getReasoningFallbackApiKey();
-  if (z1Key) {
-    try {
-      const response = await fetch(REASONING_FALLBACK_API, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${z1Key}` },
-        body: JSON.stringify({ model: REASONING_FALLBACK_MODEL, messages: contextMessages, temperature: 0.6, max_tokens: 3000 }),
-        signal: AbortSignal.timeout(60000),
-      });
-      if (response.ok) {
-        const data = await response.json() as any;
-        const msg = data.choices?.[0]?.message;
-        const reasoning = msg?.reasoning_content || '';
-        const content = msg?.content?.trim();
-        if (content) {
-          console.log(`[ReasoningAgent] GLM-Z1 analysis: ${reasoning.substring(0, 150)}...`);
-          return { content, reasoning };
+        // 降级到 GLM-Z1
+        const z1Key = getReasoningFallbackApiKey();
+        if (z1Key) {
+          try {
+            const response = await fetch(REASONING_FALLBACK_API, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${z1Key}` },
+              body: JSON.stringify({ model: REASONING_FALLBACK_MODEL, messages: contextMessages, temperature: 0.6, max_tokens: 3000 }),
+              signal: AbortSignal.timeout(60000),
+            });
+            if (response.ok) {
+              const data = await response.json() as any;
+              const msg = data.choices?.[0]?.message;
+              const reasoning = msg?.reasoning_content || '';
+              const content = msg?.content?.trim();
+              if (content) {
+                console.log(`[ReasoningAgent] GLM-Z1 analysis: ${reasoning.substring(0, 150)}...`);
+                return { content, reasoning };
+              }
+            }
+          } catch (e) {
+            console.warn('[ReasoningAgent] GLM-Z1 failed:', (e as Error).message);
+          }
         }
-      }
-    } catch (e) {
-      console.warn('[ReasoningAgent] GLM-Z1 failed:', (e as Error).message);
-    }
-  }
 
-  return null;
+        return null;
+      },
+      () => Promise.resolve(null), // 熔断时降级返回 null，触发调用方走本地模型
+    ),
+  );
 }
 
 /** 异步调用 Hermes Python CLI */
@@ -320,28 +331,38 @@ async function callHermesWithContext(message: string, systemPrompt: string, sess
 
   contextMessages.push({ role: 'user', content: `用户需求：${message}\n\n请深度理解任务本质，自由拆解分析，输出你的专业方案。不要被预设格式限制，以最能表达你创意的方式输出。` });
 
-  // 优先 LLM API
-  const apiKey = process.env.ZHIPU_API_KEY;
-  if (apiKey) {
-    try {
-      const response = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify({ model: 'glm-4-flash', messages: contextMessages, temperature: 0.8, max_tokens: 2000 }),
-        signal: AbortSignal.timeout(35000),
-      });
-      if (response.ok) {
-        const data = await response.json() as any;
-        const content = data.choices?.[0]?.message?.content?.trim();
-        if (content) return content;
-      }
-      console.warn(`[Agent] LLM API failed: ${response.status}`);
-    } catch (e) {
-      console.warn('[Agent] LLM API exception:', (e as Error).message);
-    }
-  }
+  // 通过 llmQueue 排队 + 熔断器保护执行云端 LLM 调用
+  const llmResult = await llmQueue.enqueue(
+    `hermes-${sessionId}-${Date.now()}`,
+    () => llmCircuitBreaker.call(
+      async () => {
+        const apiKey = process.env.ZHIPU_API_KEY;
+        if (!apiKey) return null;
+        try {
+          const response = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            body: JSON.stringify({ model: 'glm-4-flash', messages: contextMessages, temperature: 0.8, max_tokens: 2000 }),
+            signal: AbortSignal.timeout(35000),
+          });
+          if (response.ok) {
+            const data = await response.json() as any;
+            const content = data.choices?.[0]?.message?.content?.trim();
+            if (content) return content;
+          }
+          console.warn(`[Agent] LLM API failed: ${response.status}`);
+        } catch (e) {
+          console.warn('[Agent] LLM API exception:', (e as Error).message);
+        }
+        return null;
+      },
+      () => Promise.resolve(null), // 熔断时降级返回 null
+    ),
+  );
 
-  // 降级：本地 Hermes
+  if (llmResult) return llmResult;
+
+  // 降级：本地 Hermes（本地资源，无需排队）
   try {
     const installed = await checkHermesInstalled();
     if (installed) {
@@ -607,7 +628,44 @@ router.post('/story/write', async (req: Request, res: Response) => {
       timestamp: Date.now(),
     });
 
-    // 优先使用推理模型进行深度分析（调度Agent决定是否使用推理模型）
+    // 优先尝试本地小模型（无网络延迟）
+    const localStory = await callLocalLlmForStoryWrite(enrichedMessage);
+    if (localStory) {
+      const script = localStory.script;
+      context.thoughts.push({
+        agentName: config.name,
+        role: config.role,
+        step: 3,
+        thought: '⚡ 本地模型已完成脚本创作，跳过云端 API 调用',
+        action: 'local_llm_story',
+        timestamp: Date.now(),
+      });
+
+      recordAgentTurn({ sessionId, agentName: config.role, turnIndex: context.thoughts.length, role: 'user', content: message });
+      recordAgentTurn({ sessionId, agentName: config.role, turnIndex: context.thoughts.length + 1, role: 'assistant', content: script.substring(0, 500), summary: script.substring(0, 100) });
+      checkAndCompress(sessionId, config.role).catch(() => { });
+
+      context.finalResult = { script };
+      context.updatedAt = Date.now();
+      recordTask(sessionId, config.role, `视频脚本创作(本地)：${script.substring(0, 80)}...`, { script: script.substring(0, 200) });
+      agentContexts.set(sessionId, context);
+
+      if (!res.headersSent) {
+        res.json({
+          success: true,
+          sessionId,
+          agentName: config.name,
+          role: config.role,
+          result: { script },
+          thoughts: context.thoughts,
+          reasoning: '',
+          modelUsed: 'local-qwen3-4b',
+        });
+      }
+      return;
+    }
+
+    // 降级：使用推理模型进行深度分析（调度Agent决定是否使用推理模型）
     const reasoningResult = await callReasoningAgent(enrichedMessage, config.systemPrompt, sessionId, history, config.role, 'video');
     let hermesResponse = '';
     let reasoningTrace = '';
@@ -649,16 +707,18 @@ router.post('/story/write', async (req: Request, res: Response) => {
     recordTask(sessionId, config.role, `视频脚本创作：${script.substring(0, 80)}...`, { script: script.substring(0, 200) });
     agentContexts.set(sessionId, context);
 
-    res.json({
-      success: true,
-      sessionId,
-      agentName: config.name,
-      role: config.role,
-      result: { script },
-      thoughts: context.thoughts,
-      reasoning: reasoningTrace?.substring(0, 500),
-      modelUsed: reasoningResult ? 'reasoning' : 'instruction',
-    });
+    if (!res.headersSent) {
+      res.json({
+        success: true,
+        sessionId,
+        agentName: config.name,
+        role: config.role,
+        result: { script },
+        thoughts: context.thoughts,
+        reasoning: reasoningTrace?.substring(0, 500),
+        modelUsed: reasoningResult ? 'reasoning' : 'instruction',
+      });
+    }
   } catch (error) {
     console.error('Story writer error:', error);
     res.json({
@@ -668,9 +728,496 @@ router.post('/story/write', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * 本地 LLM：故事创作脚本生成
+ * 针对中文短视频脚本创作，输出分场景中文描述
+ */
+async function callLocalLlmForStoryWrite(message: string): Promise<{ script: string } | null> {
+  if (process.env.LOCAL_LLM_ENABLED !== 'true') return null;
+
+  const inputMsg = message.substring(0, 300);
+
+  const localPrompt = `根据用户需求创作短视频脚本，输出分场景的中文描述，3-5个场景，每场景20-50字。只输出JSON数组。
+示例:
+输入: 樱花女孩跳舞
+输出: [{"scene":1,"description":"远景：女孩站在樱花树下，微风拂过，花瓣飘起。"},{"scene":2,"description":"中景：女孩轻盈起舞，阳光透过花瓣洒下光斑。"},{"scene":3,"description":"特写：女孩微笑的脸庞，发丝轻扬，一朵樱花落在肩头。"}]
+
+输入: ${inputMsg}
+输出:`;
+
+  const result = await localLlmService.generate(localPrompt, {
+    model: 'qwen3-4b',
+    systemPrompt: 'You are a creative script writer. Output JSON array only.',
+    maxTokens: 600,
+    temperature: 0.6,
+  });
+
+  if (!result.success || !result.text) {
+    console.log(`[LocalLLM] 故事创作失败: ${result.error || '无输出'}`);
+    return null;
+  }
+
+  console.log(`[LocalLLM] 故事创作原始输出: ${result.text.substring(0, 200)}`);
+
+  const jsonMatch = result.text.match(/\[[\s\S]*\]/);
+  if (!jsonMatch) {
+    // 尝试匹配 {
+    const jsonObj = result.text.match(/\{[\s\S]*\}/);
+    if (jsonObj) {
+      try {
+        const obj = JSON.parse(jsonObj[0]);
+        const scenes = Array.isArray(obj) ? obj : (obj.scenes || []);
+        if (scenes.length >= 2) {
+          const script = scenes.map((s: any) => `【场景${s.scene}】${s.description}`).join('\n\n');
+          console.log(`[LocalLLM] 故事创作JSON对象模式解析成功 (${result.durationMs}ms): ${scenes.length}场景`);
+          return { script };
+        }
+      } catch { /* ignore */ }
+    }
+    console.log(`[LocalLLM] 故事创作输出无JSON数组: ${result.text.substring(0, 100)}`);
+    return null;
+  }
+
+  try {
+    const scenes = JSON.parse(jsonMatch[0]);
+    if (!Array.isArray(scenes) || scenes.length < 2) {
+      console.log('[LocalLLM] 故事创作JSON场景不足2个，放弃');
+      return null;
+    }
+
+    const script = scenes.map((s: any) => {
+      const idx = s.scene || s.index || scenes.indexOf(s) + 1;
+      return `【场景${idx}】${s.description || s.content || s.text || JSON.stringify(s)}`;
+    }).join('\n\n');
+
+    console.log(`[LocalLLM] 故事创作成功 (${result.durationMs}ms): ${scenes.length}场景, ${script.length}字`);
+    return { script };
+  } catch {
+    console.log(`[LocalLLM] 故事创作JSON解析失败: ${jsonMatch[0].substring(0, 100)}`);
+    return null;
+  }
+}
+
+/**
+ * 本地 LLM：图像参数分析
+ * 输出英文 prompt + 风格 + 构图，使用与视频相同的预翻译关键词注入策略
+ */
+async function callLocalLlmForImageAnalysis(message: string): Promise<Record<string, any> | null> {
+  if (process.env.LOCAL_LLM_ENABLED !== 'true') return null;
+
+  const inputMsg = message.substring(0, 300);
+
+  // 复用视频关键词词典（图像/视频词汇高度重叠）
+  const keywordMap = findTranslatableKeywords(inputMsg);
+  const englishKeywords = collectEnglishKeywords(keywordMap);
+  const cnKeys = [...keywordMap.keys()];
+
+  console.log(`[LocalLLM] 图像分析命中关键词: 中文=[${cnKeys.join(', ')}] 英文=[${englishKeywords.join(', ')}]`);
+
+  const keywordLine = englishKeywords.length > 0
+    ? `必须包含关键词: ${englishKeywords.join(', ')}`
+    : '';
+
+  const localPrompt = `将中文图像创作需求翻译为高质量英文Prompt，输出JSON。
+${keywordLine}
+
+示例1:
+输入: 一只橘猫在窗台上晒太阳
+必须包含关键词: cat, sunlight, windowsill
+输出: {"prompt":"A fluffy orange cat basking in warm sunlight on a windowsill, soft golden hour light, cozy atmosphere, shallow depth of field, photorealistic","style":"photorealistic","composition":"close-up","colorPalette":"warm golden"}
+
+示例2:
+输入: 赛博朋克风格的城市夜景
+必须包含关键词: city, night, neon
+输出: {"prompt":"A cyberpunk cityscape at night with glowing neon signs, wet reflective streets, futuristic skyscrapers, rain, dramatic purple and cyan lighting","style":"cyberpunk","composition":"wide angle","colorPalette":"neon purple cyan"}
+
+输入: ${inputMsg}
+${keywordLine}
+输出:`;
+
+  const result = await localLlmService.generate(localPrompt, {
+    model: 'qwen3-4b',
+    systemPrompt: 'You are an image prompt engineer. Output JSON only.',
+    maxTokens: 400,
+    temperature: 0.4,
+  });
+
+  if (!result.success || !result.text) {
+    console.log(`[LocalLLM] 图像分析失败: ${result.error || '无输出'}`);
+    return null;
+  }
+
+  console.log(`[LocalLLM] 图像分析原始输出: ${result.text.substring(0, 200)}`);
+
+  const jsonMatch = result.text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    console.log(`[LocalLLM] 图像分析输出无JSON: ${result.text.substring(0, 100)}`);
+    return null;
+  }
+
+  try {
+    const analysis = JSON.parse(jsonMatch[0]);
+
+    if (!analysis.prompt || typeof analysis.prompt !== 'string' || analysis.prompt.length < 10) {
+      console.log('[LocalLLM] 图像分析JSON缺少有效prompt字段');
+      return null;
+    }
+
+    // 相关性校验（与视频分析使用相同逻辑）
+    const outputLower = analysis.prompt.toLowerCase();
+    const relevanceScore = checkRelevance(englishKeywords, outputLower);
+    console.log(`[LocalLLM] 图像分析相关性: relevance=${relevanceScore.toFixed(2)} (需 >= 0.4)`);
+
+    if (relevanceScore < 0.4) {
+      console.log(`[LocalLLM] 图像分析输出与输入不相关 (relevance=${relevanceScore}), 拒绝幻觉输出`);
+      return null;
+    }
+
+    if (!analysis.style) analysis.style = 'photorealistic';
+    if (!analysis.composition) analysis.composition = 'auto';
+
+    console.log(`[LocalLLM] 图像分析成功 (${result.durationMs}ms, relevance=${relevanceScore.toFixed(2)}): ${analysis.prompt.substring(0, 60)}...`);
+    return analysis;
+  } catch {
+    console.log(`[LocalLLM] 图像分析JSON解析失败: ${jsonMatch[0].substring(0, 100)}`);
+    return null;
+  }
+}
+
+/**
+ * 本地 LLM：视频剪辑方案分析
+ * 输出 action / analysis / params JSON
+ */
+async function callLocalLlmForVideoEdit(message: string): Promise<Record<string, any> | null> {
+  if (process.env.LOCAL_LLM_ENABLED !== 'true') return null;
+
+  const inputMsg = message.substring(0, 300);
+
+  // 提取数字（用于时间参数）
+  const numMatches = inputMsg.match(/(\d+)/g) || [];
+
+  const localPrompt = `分析视频修改需求，输出JSON剪辑方案。
+动作类型: subtitle(字幕) | dubbing(配音) | trim(裁剪) | replace(替换) | smart-edit(智能剪辑)
+
+示例1:
+输入: 给视频加字幕，内容是：大家好，欢迎来到我的频道
+输出: {"action":"subtitle","analysis":"用户需要添加字幕，字幕内容已提供","params":{"subtitleText":"大家好，欢迎来到我的频道","subtitleLang":"zh"},"explanation":"为视频添加中文字幕，字幕内容与输入一致。"}
+
+示例2:
+输入: 把前5秒剪掉
+输出: {"action":"trim","analysis":"用户要求裁剪视频开头部分，长度5秒","params":{"trimStart":0,"trimEnd":5},"explanation":"将视频从0秒裁剪到5秒，移除前5秒内容。"}
+
+示例3:
+输入: 把配音改成：今天天气真好
+输出: {"action":"dubbing","analysis":"用户需要替换配音音频，新的配音文案已提供","params":{"dubbingText":"今天天气真好","dubbingVoice":"zh-CN-XiaoxiaoNeural","dubbingSpeed":1.0},"explanation":"用温柔女声重新配音，配音内容为输入文本。"}
+
+输入: ${inputMsg}
+输出:`;
+
+  const result = await localLlmService.generate(localPrompt, {
+    model: 'qwen3-4b',
+    systemPrompt: 'You are a video editing planner. Output JSON only.',
+    maxTokens: 500,
+    temperature: 0.3,
+  });
+
+  if (!result.success || !result.text) {
+    console.log(`[LocalLLM] 视频剪辑分析失败: ${result.error || '无输出'}`);
+    return null;
+  }
+
+  console.log(`[LocalLLM] 视频剪辑分析原始输出: ${result.text.substring(0, 200)}`);
+
+  const jsonMatch = result.text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    console.log(`[LocalLLM] 视频剪辑分析输出无JSON: ${result.text.substring(0, 100)}`);
+    return null;
+  }
+
+  try {
+    const plan = JSON.parse(jsonMatch[0]);
+
+    if (!plan.action || typeof plan.action !== 'string') {
+      console.log('[LocalLLM] 视频剪辑分析JSON缺少action字段');
+      return null;
+    }
+
+    // 智能校验：如果是trim动作且提取到数字，修正时间参数
+    if (plan.action === 'trim' && numMatches.length >= 1) {
+      if (!plan.params) plan.params = {};
+      if (numMatches.length === 1) {
+        // "剪掉前5秒" → trimEnd = 5
+        if (/前|开头|起始|前面|一开始/.test(inputMsg)) {
+          plan.params.trimStart = 0;
+          plan.params.trimEnd = parseInt(numMatches[0]);
+        } else if (/后|结尾|最后|末尾/.test(inputMsg)) {
+          plan.params.trimStart = -parseInt(numMatches[0]);
+        }
+      } else if (numMatches.length >= 2) {
+        plan.params.trimStart = parseInt(numMatches[0]);
+        plan.params.trimEnd = parseInt(numMatches[1]);
+      }
+    }
+
+    if (!plan.params) plan.params = {};
+    if (!plan.analysis) plan.analysis = inputMsg.substring(0, 100);
+    if (!plan.explanation) plan.explanation = plan.analysis;
+
+    console.log(`[LocalLLM] 视频剪辑分析成功 (${result.durationMs}ms): action=${plan.action}`);
+    return plan;
+  } catch {
+    console.log(`[LocalLLM] 视频剪辑分析JSON解析失败: ${jsonMatch[0].substring(0, 100)}`);
+    return null;
+  }
+}
+
+/**
+ * 本地 LLM：视频参数分析（已接入）
+ */
+/**
+ * 中文视频场景关键词词典（中文 → 英文关键词）
+ * 使用子串匹配扫描输入，因此中文键应取最短有意义词组
+ */
+const VIDEO_KEYWORD_DICT: Record<string, string[]> = {
+  '女孩': ['girl', 'young woman'],
+  '男孩': ['boy', 'young man'],
+  '女人': ['woman'],
+  '男人': ['man'],
+  '少女': ['girl', 'maiden'],
+  '樱花': ['cherry blossom', 'sakura'],
+  '跳舞': ['dancing', 'dance'],
+  '舞蹈': ['dancing', 'dance'],
+  '猫': ['cat'],
+  '猫咪': ['cat', 'kitten'],
+  '小狗': ['puppy', 'dog'],
+  '狗': ['dog'],
+  '赛车': ['racing car', 'race car'],
+  '赛道': ['race track', 'track'],
+  '飞驰': ['speeding', 'racing'],
+  '阳光': ['sunlight', 'sun'],
+  '窗台': ['windowsill', 'window'],
+  '晒太阳': ['basking in sunlight'],
+  '城市': ['city', 'urban'],
+  '夜景': ['night', 'neon'],
+  '海洋': ['ocean', 'sea'],
+  '海浪': ['wave', 'ocean wave'],
+  '海滩': ['beach'],
+  '山脉': ['mountain'],
+  '山': ['mountain', 'hill'],
+  '森林': ['forest'],
+  '树木': ['tree'],
+  '树': ['tree'],
+  '雪': ['snow'],
+  '雪景': ['snow', 'snowy'],
+  '雨': ['rain'],
+  '下雨': ['raining', 'rain'],
+  '夕阳': ['sunset'],
+  '日落': ['sunset'],
+  '日出': ['sunrise'],
+  '湖': ['lake'],
+  '湖面': ['lake'],
+  '河流': ['river'],
+  '宇宙': ['space', 'galaxy'],
+  '星空': ['starry sky', 'stars'],
+  '星星': ['star', 'stars'],
+  '机器人': ['robot'],
+  '奥特曼': ['ultraman'],
+  '怪兽': ['monster', 'kaiju'],
+  '城堡': ['castle'],
+  '宫殿': ['palace'],
+  '花园': ['garden'],
+  '沙漠': ['desert'],
+  '瀑布': ['waterfall'],
+  '彩虹': ['rainbow'],
+  '火焰': ['flame', 'fire'],
+  '闪电': ['lightning'],
+  '云': ['cloud'],
+  '天空': ['sky'],
+  '草地': ['grass', 'meadow'],
+  '花朵': ['flower'],
+  '蝴蝶': ['butterfly'],
+  '鸟': ['bird'],
+  '鱼': ['fish'],
+  '马': ['horse'],
+  '龙': ['dragon'],
+  '飞机': ['airplane', 'plane'],
+  '火车': ['train'],
+  '船': ['boat', 'ship'],
+  '自行车': ['bicycle', 'bike'],
+  '街道': ['street'],
+  '桥梁': ['bridge'],
+  '摩天大楼': ['skyscraper'],
+  '咖啡': ['coffee'],
+  '美食': ['food', 'cuisine'],
+  '蛋糕': ['cake'],
+  '音乐': ['music'],
+  '钢琴': ['piano'],
+  '吉他': ['guitar'],
+  '书': ['book'],
+  '画': ['painting', 'drawing'],
+  '相机': ['camera'],
+  '雨伞': ['umbrella'],
+  '气球': ['balloon'],
+  '风筝': ['kite'],
+  '萤火虫': ['firefly'],
+  '极光': ['aurora'],
+  '火山': ['volcano'],
+  '冰川': ['glacier', 'iceberg'],
+};
+
+/**
+ * 从中文输入文本中扫描词典命中的关键词，返回中文→英文映射
+ * 使用子串匹配，不依赖分词，避免"一个女孩"无法匹配"女孩"的问题
+ */
+function findTranslatableKeywords(text: string): Map<string, string[]> {
+  const found = new Map<string, string[]>();
+  for (const [cn, en] of Object.entries(VIDEO_KEYWORD_DICT)) {
+    if (text.includes(cn)) {
+      // 保留首次命中的英文翻译
+      if (!found.has(cn)) {
+        found.set(cn, en);
+      }
+    }
+  }
+  return found;
+}
+
+/**
+ * 收集所有命中的英文关键词（去重）
+ */
+function collectEnglishKeywords(keywordMap: Map<string, string[]>): string[] {
+  const set = new Set<string>();
+  for (const enList of keywordMap.values()) {
+    for (const en of enList) {
+      set.add(en);
+    }
+  }
+  return [...set];
+}
+
+async function callLocalLlmForVideoAnalysis(script: string): Promise<Record<string, any> | null> {
+  if (process.env.LOCAL_LLM_ENABLED !== 'true') return null;
+  if (!script || typeof script !== 'string') return null;
+
+  const inputScript = script.substring(0, 300);
+
+  // 从脚本中提取时长（不依赖模型）
+  const durationMatch = inputScript.match(/(\d+)\s*秒/);
+  const duration = durationMatch ? parseInt(durationMatch[1]) : 10;
+
+  // 预翻译关键词：扫描输入命中的词典词汇
+  const keywordMap = findTranslatableKeywords(inputScript);
+  const englishKeywords = collectEnglishKeywords(keywordMap);
+  const cnKeys = [...keywordMap.keys()];
+
+  console.log(`[LocalLLM] 命中关键词: 中文=[${cnKeys.join(', ')}] 英文=[${englishKeywords.join(', ')}]`);
+
+  // 少样本提示：预翻译关键词直接注入，强制模型使用指定英文词
+  const keywordLine = englishKeywords.length > 0
+    ? `必须包含关键词: ${englishKeywords.join(', ')}`
+    : '';
+
+  const localPrompt = `将中文视频脚本翻译为英文视频生成提示词，只输出JSON。
+${keywordLine}
+
+示例1:
+输入: 猫咪在窗台上晒太阳
+必须包含关键词: cat, sunlight, windowsill
+输出: {"prompt":"A fluffy cat basking in warm sunlight on a windowsill, soft golden hour light, cozy atmosphere, slow zoom in","style":"cinematic","duration":10}
+
+示例2:
+输入: 赛车在赛道上飞驰
+必须包含关键词: racing car, race track, speeding
+输出: {"prompt":"A racing car speeding on a race track, motion blur, dynamic angle, engine smoke, adrenaline rush, fast pan","style":"realistic","duration":15}
+
+输入: ${inputScript}
+${keywordLine}
+输出:`;
+
+  const result = await localLlmService.generate(localPrompt, {
+    model: 'qwen3-4b',
+    systemPrompt: 'You are a video prompt translator. Output JSON only. You must use the specified keywords in the prompt.',
+    maxTokens: 400,
+    temperature: 0.3,
+  });
+
+  if (!result.success || !result.text) {
+    console.log(`[LocalLLM] 视频分析失败: ${result.error || '无输出'}`);
+    return null;
+  }
+
+  console.log(`[LocalLLM] 原始输出 (${result.text.length}字符): ${result.text.substring(0, 200)}`);
+
+  // 从输出中提取 JSON
+  const jsonMatch = result.text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    console.log(`[LocalLLM] 视频分析输出无JSON: ${result.text.substring(0, 100)}`);
+    return null;
+  }
+
+  try {
+    const analysis = JSON.parse(jsonMatch[0]);
+
+    console.log(`[LocalLLM] JSON解析成功: prompt="${analysis.prompt?.substring(0, 80)}..." style=${analysis.style} duration=${analysis.duration}`);
+
+    // 基本字段校验
+    if (!analysis.prompt || typeof analysis.prompt !== 'string' || analysis.prompt.length < 10) {
+      console.log('[LocalLLM] 视频分析JSON缺少有效prompt字段');
+      return null;
+    }
+
+    // 相关性校验：直接检查预翻译的英文关键词是否出现在输出中
+    const outputLower = analysis.prompt.toLowerCase();
+    const relevanceScore = checkRelevance(englishKeywords, outputLower);
+    console.log(`[LocalLLM] 相关性校验: relevance=${relevanceScore.toFixed(2)} (需 >= 0.4)`);
+
+    if (relevanceScore < 0.4) {
+      console.log(`[LocalLLM] 视频分析输出与输入不相关 (relevance=${relevanceScore}), 拒绝幻觉输出`);
+      console.log(`[LocalLLM] 输出prompt: ${analysis.prompt.substring(0, 120)}`);
+      return null;
+    }
+
+    // 补全字段
+    if (!analysis.duration || typeof analysis.duration !== 'number') {
+      analysis.duration = duration;
+    }
+    if (!analysis.style) {
+      analysis.style = 'cinematic';
+    }
+    if (!analysis.sceneBreakdown) {
+      analysis.sceneBreakdown = [];
+    }
+
+    console.log(`[LocalLLM] 视频分析成功 (${result.durationMs}ms, relevance=${relevanceScore.toFixed(2)}): ${analysis.prompt.substring(0, 60)}...`);
+    return analysis;
+  } catch {
+    console.log(`[LocalLLM] 视频分析JSON解析失败: ${jsonMatch[0].substring(0, 100)}`);
+    return null;
+  }
+}
+
+/**
+ * 检查预翻译的英文关键词是否出现在输出中
+ * 返回 0-1 的分数，越高越相关
+ */
+function checkRelevance(englishKeywords: string[], outputText: string): number {
+  // 无预翻译关键词（输入未命中词典），跳过校验
+  if (englishKeywords.length === 0) return 1;
+
+  let matched = 0;
+  for (const en of englishKeywords) {
+    if (outputText.includes(en.toLowerCase())) {
+      matched++;
+    }
+  }
+
+  return matched / englishKeywords.length;
+}
+
 router.post('/video/analyze', async (req: Request, res: Response) => {
   try {
-    const { script, sessionId: existingSessionId, originalMessage, history, imageUrls } = req.body;
+    const { sessionId: existingSessionId, originalMessage, history, imageUrls } = req.body;
+    const script = req.body.script || req.body.message || '';
 
     // 多模态预处理：分析参考图片，将视觉信息融入脚本
     const visionResult = await enrichMessageWithVision(script, imageUrls);
@@ -697,15 +1244,47 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
       timestamp: Date.now(),
     });
 
+    // 优先尝试本地小模型（无网络延迟，~5-10秒）
+    const localAnalysis = await callLocalLlmForVideoAnalysis(enrichedScript);
+    if (localAnalysis) {
+      context.thoughts.push({
+        agentName: config.name,
+        role: config.role,
+        step: 2,
+        thought: '⚡ 本地模型已完成视频参数分析，跳过云端 API 调用',
+        action: 'local_llm_analysis',
+        timestamp: Date.now(),
+      });
+
+      context.finalResult = localAnalysis;
+      context.updatedAt = Date.now();
+      recordTask(sessionId, config.role, `${config.name}完成分析(本地模型)`, { action: 'analyzed' });
+      agentContexts.set(sessionId, context);
+
+      if (!res.headersSent) {
+        res.json({
+          success: true,
+          sessionId,
+          agentName: config.name,
+          role: config.role,
+          result: localAnalysis,
+          thoughts: context.thoughts,
+          reasoning: '',
+          modelUsed: 'local-qwen3-4b',
+        });
+      }
+      return;
+    }
+
     context.thoughts.push({
       agentName: config.name,
       role: config.role,
       step: 2,
-      thought: '🧠 推理模型正在深度分析视频参数：主题、风格、时长、分镜...',
+      thought: '🧠 本地模型不可用或输出无效，降级到云端推理模型深度分析...',
       timestamp: Date.now(),
     });
 
-    // 优先使用推理模型（调度Agent决定）
+    // 降级：使用云端推理模型（调度Agent决定）
     const reasoningResult = await callReasoningAgent(enrichedScript, config.systemPrompt, sessionId, history, config.role, 'video');
     let hermesResponse = '';
     let reasoningTrace = '';
@@ -752,22 +1331,26 @@ router.post('/video/analyze', async (req: Request, res: Response) => {
     recordTask(sessionId, config.role, `${config.name}完成分析`, { action: 'analyzed' });
     agentContexts.set(sessionId, context);
 
-    res.json({
-      success: true,
-      sessionId,
-      agentName: config.name,
-      role: config.role,
-      result: analysis,
-      thoughts: context.thoughts,
-      reasoning: reasoningTrace?.substring(0, 500),
-      modelUsed: reasoningResult ? 'reasoning' : 'instruction',
-    });
+    if (!res.headersSent) {
+      res.json({
+        success: true,
+        sessionId,
+        agentName: config.name,
+        role: config.role,
+        result: analysis,
+        thoughts: context.thoughts,
+        reasoning: reasoningTrace?.substring(0, 500),
+        modelUsed: reasoningResult ? 'reasoning' : 'instruction',
+      });
+    }
   } catch (error) {
     console.error('Video analyzer error:', error);
-    res.json({
-      success: false,
-      error: `视频参数分析失败: ${(error as Error).message}`,
-    });
+    if (!res.headersSent) {
+      res.json({
+        success: false,
+        error: `视频参数分析失败: ${(error as Error).message}`,
+      });
+    }
   }
 });
 
@@ -808,7 +1391,42 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
       timestamp: Date.now(),
     });
 
-    // 优先使用推理模型（调度Agent决定）
+    // 优先尝试本地小模型（无网络延迟）
+    const localAnalysis = await callLocalLlmForImageAnalysis(enrichedMessage);
+    if (localAnalysis) {
+      context.thoughts.push({
+        agentName: config.name,
+        role: config.role,
+        step: 3,
+        thought: '⚡ 本地模型已完成图像参数分析，跳过云端 API 调用',
+        action: 'local_llm_image',
+        timestamp: Date.now(),
+      });
+
+      recordAgentTurn({ sessionId, agentName: config.role, turnIndex: 0, role: 'user', content: message?.substring(0, 300) });
+      checkAndCompress(sessionId, config.role).catch(() => { });
+
+      context.finalResult = localAnalysis;
+      context.updatedAt = Date.now();
+      recordTask(sessionId, config.role, `${config.name}完成分析(本地)`, { action: 'analyzed' });
+      agentContexts.set(sessionId, context);
+
+      if (!res.headersSent) {
+        res.json({
+          success: true,
+          sessionId,
+          agentName: config.name,
+          role: config.role,
+          result: localAnalysis,
+          thoughts: context.thoughts,
+          reasoning: '',
+          modelUsed: 'local-qwen3-4b',
+        });
+      }
+      return;
+    }
+
+    // 降级：使用推理模型（调度Agent决定）
     const reasoningResult = await callReasoningAgent(enrichedMessage, config.systemPrompt, sessionId, history, config.role, 'image');
     let hermesResponse = '';
     let reasoningTrace = '';
@@ -855,16 +1473,18 @@ router.post('/image/analyze', async (req: Request, res: Response) => {
     recordTask(sessionId, config.role, `${config.name}完成分析`, { action: 'analyzed' });
     agentContexts.set(sessionId, context);
 
-    res.json({
-      success: true,
-      sessionId,
-      agentName: config.name,
-      role: config.role,
-      result: analysis,
-      thoughts: context.thoughts,
-      reasoning: reasoningTrace?.substring(0, 500),
-      modelUsed: reasoningResult ? 'reasoning' : 'instruction',
-    });
+    if (!res.headersSent) {
+      res.json({
+        success: true,
+        sessionId,
+        agentName: config.name,
+        role: config.role,
+        result: analysis,
+        thoughts: context.thoughts,
+        reasoning: reasoningTrace?.substring(0, 500),
+        modelUsed: reasoningResult ? 'reasoning' : 'instruction',
+      });
+    }
   } catch (error) {
     console.error('Image analyzer error:', error);
     res.json({
@@ -1097,7 +1717,61 @@ router.post('/video/edit', async (req: Request, res: Response) => {
       timestamp: Date.now(),
     });
 
-    // 优先使用推理模型
+    // 优先尝试本地小模型（无网络延迟）
+    const localEditPlan = await callLocalLlmForVideoEdit(message);
+    if (localEditPlan) {
+      let editResult = null;
+      if (videoPath && localEditPlan.action) {
+        try {
+          const operations: EditOperation[] = [localEditPlan.action];
+          const params: EditParams = localEditPlan.params || {};
+          const task = videoEditService.createTask(videoPath, operations, params);
+          editResult = await videoEditService.executeTask(task.id);
+        } catch (err: any) {
+          console.error('[VideoEdit Agent] Local执行失败:', err.message);
+        }
+      }
+
+      context.thoughts.push({
+        agentName: config.name,
+        role: config.role,
+        step: 3,
+        thought: editResult ? '⚡ 本地模型已完成剪辑方案，视频剪辑完成' : '⚡ 本地模型已完成剪辑方案生成，跳过云端 API 调用',
+        action: `local_llm_${localEditPlan.action}`,
+        output: editResult ? `输出: ${editResult.outputUrl}` : JSON.stringify(localEditPlan).substring(0, 100),
+        timestamp: Date.now(),
+      });
+
+      recordAgentTurn({ sessionId, agentName: config.role, turnIndex: context.thoughts.length, role: 'user', content: message });
+      recordAgentTurn({ sessionId, agentName: config.role, turnIndex: context.thoughts.length + 1, role: 'assistant', content: JSON.stringify(localEditPlan).substring(0, 500) });
+      checkAndCompress(sessionId, config.role).catch(() => { });
+
+      context.finalResult = { editPlan: localEditPlan, editResult };
+      context.updatedAt = Date.now();
+      recordTask(sessionId, config.role, `视频剪辑(本地): ${localEditPlan.action || '分析'}`, { action: localEditPlan?.action });
+      agentContexts.set(sessionId, context);
+
+      if (!res.headersSent) {
+        res.json({
+          success: true,
+          sessionId,
+          agentName: config.name,
+          role: config.role,
+          editPlan: localEditPlan,
+          editResult: editResult ? {
+            outputUrl: editResult.outputUrl,
+            duration: editResult.duration,
+            fileSize: editResult.fileSize,
+          } : null,
+          thoughts: context.thoughts,
+          reasoning: '',
+          modelUsed: 'local-qwen3-4b',
+        });
+      }
+      return;
+    }
+
+    // 降级：使用推理模型
     const reasoningResult = await callReasoningAgent(message, enhancedPrompt, sessionId, history, config.role, 'video');
     let hermesResponse = '';
     let reasoningTrace = '';
@@ -1161,21 +1835,23 @@ router.post('/video/edit', async (req: Request, res: Response) => {
     recordTask(sessionId, config.role, `视频剪辑: ${editPlan?.action || '分析'}`, { action: editPlan?.action });
     agentContexts.set(sessionId, context);
 
-    res.json({
-      success: true,
-      sessionId,
-      agentName: config.name,
-      role: config.role,
-      editPlan,
-      editResult: editResult ? {
-        outputUrl: editResult.outputUrl,
-        duration: editResult.duration,
-        fileSize: editResult.fileSize,
-      } : null,
-      thoughts: context.thoughts,
-      reasoning: reasoningTrace?.substring(0, 500),
-      modelUsed: reasoningResult ? 'reasoning' : 'instruction',
-    });
+    if (!res.headersSent) {
+      res.json({
+        success: true,
+        sessionId,
+        agentName: config.name,
+        role: config.role,
+        editPlan,
+        editResult: editResult ? {
+          outputUrl: editResult.outputUrl,
+          duration: editResult.duration,
+          fileSize: editResult.fileSize,
+        } : null,
+        thoughts: context.thoughts,
+        reasoning: reasoningTrace?.substring(0, 500),
+        modelUsed: reasoningResult ? 'reasoning' : 'instruction',
+      });
+    }
   } catch (error) {
     console.error('Video editor agent error:', error);
     res.json({
