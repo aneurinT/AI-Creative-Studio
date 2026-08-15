@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * GGUF 模型下载脚本（支持 ModelScope 和 HuggingFace）
+ * GGUF 模型下载脚本（支持 HuggingFace）
  *
  * 用法：
  *   node scripts/download-gguf-models.mjs [model-name]
- *   node scripts/download-gguf-models.mjs qwen3-0.6b
+ *   node scripts/download-gguf-models.mjs qwen3-4b
  *   node scripts/download-gguf-models.mjs all
  */
 
@@ -21,14 +21,6 @@ const MODELS_DIR = path.join(projectRoot, 'data', 'gguf_models');
 fs.mkdirSync(MODELS_DIR, { recursive: true });
 
 const MODELS = {
-  'qwen3-0.6b': {
-    displayName: 'Qwen3-0.6B-Q8_0',
-    source: 'modelscope',
-    repo: 'unsloth/Qwen3-0.6B-GGUF',
-    file: 'Qwen3-0.6B-Q8_0.gguf',
-    destFile: 'qwen3-0.6b-q8_0.gguf',
-    sizeGb: 0.61,
-  },
   'qwen3-4b': {
     displayName: 'Qwen3-4B-Instruct-2507 (Q4_K_M)',
     source: 'huggingface',

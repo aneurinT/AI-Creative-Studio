@@ -230,11 +230,13 @@ export const llmCircuitBreaker = new CircuitBreaker(5, 30000, 3);
 
 export function timeoutMiddleware(timeoutMs = 30000) {
   return (req: Request, res: Response, next: NextFunction) => {
+    // agent 路由使用本地模型 CPU 推理，需要更长超时（~80s/次）
+    const effectiveTimeout = req.path.startsWith('/api/agents/') ? 180000 : timeoutMs;
     const timer = setTimeout(() => {
       if (!res.headersSent) {
         res.status(504).json({ success: false, error: '请求超时' });
       }
-    }, timeoutMs);
+    }, effectiveTimeout);
 
     res.on('finish', () => clearTimeout(timer));
     next();

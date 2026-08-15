@@ -58,3 +58,20 @@ LTX-Video/
 *.sln
 *.sw?
 .vite
+
+# GGUF 模型文件（2.3GB+，不纳入版本控制）
+api/data/gguf_models/*.gguf
+api/data/Qwen3-*/
+
+# ModelScope Python SDK（已改用纯 HTTP 下载）
+api/pylibs/
+
+# 临时视频和生成内容
+api/data/temp_videos/
+api/public/videos/
+api/public/images/*.mp4
+api/public/uploads/
+
+# 构建产物
+dist/
+dist-electron/

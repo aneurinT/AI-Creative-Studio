@@ -53,16 +53,6 @@ export interface LocalModelInfo {
 
 const MODEL_REGISTRY: LocalModelConfig[] = [
   {
-    name: 'qwen3-0.6b',
-    displayName: 'Qwen3-0.6B-Q8_0 (本地推理)',
-    ggufFile: 'qwen3-0.6b-q8_0.gguf',
-    hfRepo: 'unsloth/Qwen3-0.6B-GGUF',
-    hfFile: 'Qwen3-0.6B-Q8_0.gguf',
-    contextLength: 32768,
-    minVramGb: 1,
-    description: '超轻量通用推理，中文优化，约610MB',
-  },
-  {
     name: 'qwen3-4b',
     displayName: 'Qwen3-4B (本地推理)',
     ggufFile: 'qwen3-4b-instruct-q4_k_m.gguf',
