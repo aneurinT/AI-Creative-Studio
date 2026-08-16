@@ -15,6 +15,7 @@ import { llmQueue, llmCircuitBreaker } from '../services/concurrencyService.js';
 import { createCheckpoint, resolveCheckpoint, rejectCheckpoint, getLatestState, getSessionProgress, completeAgentCheckpoints, CHECKPOINT_STAGES } from '../services/checkpointService.js';
 
 import { CHAT_MODEL, CHAT_API, getChatApiKey, CHAT_FALLBACK_MODEL, CHAT_FALLBACK_API, getChatFallbackApiKey, REASONING_MODEL, REASONING_API, getReasoningApiKey, REASONING_FALLBACK_MODEL, REASONING_FALLBACK_API, getReasoningFallbackApiKey } from '../services/llmConfig.js';
+import { localLlmService } from '../services/localLlmService.js';
 
 const HERMES_PYTHON_PATH = process.platform === 'win32' ? 'python' : 'python3';
 const HERMES_MODULE = 'hermes_cli.main';
@@ -265,6 +266,78 @@ async function tryCallLLM(
 }
 
 /**
+ * 调用本地 Qwen3-4B 模型进行意图识别（零成本、低延迟）
+ * 作为首轮推理优先调用，成功则跳过云端 API，失败时回退到 callLLM
+ */
+async function callLocalLLM(message: string, history: any[]): Promise<{ action: string; params: Record<string, any>; response: string } | null> {
+  if (process.env.LOCAL_LLM_ENABLED !== 'true') return null;
+
+  const modelName = 'qwen3-4b';
+  if (!localLlmService.modelExists(modelName)) {
+    console.warn('[LocalLLM] 模型文件不存在，跳过本地推理');
+    return null;
+  }
+
+  try {
+    const chatHistory = (history || []).slice(-6).map((m: any) => {
+      let content = (m.content || '').substring(0, 500);
+      if (m.role === 'assistant' && m.actionType) {
+        const ctxParts: string[] = [`[上一轮任务: ${m.actionType}]`];
+        if (m.params?.prompt) ctxParts.push(`原始描述: ${m.params.prompt}`);
+        if (m.params?.style) ctxParts.push(`风格: ${m.params.style}`);
+        if (m.params?.duration) ctxParts.push(`时长: ${m.params.duration}秒`);
+        content = `${ctxParts.join(' | ')}\n${content}`;
+      }
+      return { role: (m.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant', content };
+    });
+
+    const result = await localLlmService.generate(message, {
+      model: modelName,
+      systemPrompt: SHARED_INTENT_PROMPT,
+      maxTokens: 400,
+      temperature: 0.5,
+      history: chatHistory,
+    });
+
+    if (!result.success || !result.text) {
+      console.warn(`[LocalLLM] 推理失败: ${result.error || '无输出'}`);
+      return null;
+    }
+
+    const text = result.text.trim();
+    console.log(`[LocalLLM] 原始输出 (${result.durationMs}ms): ${text.substring(0, 120)}...`);
+
+    // 必须包含有效 JSON 且有 action 字段，否则视为本地模型未理解
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.warn('[LocalLLM] 输出不含 JSON，跳过本地推理');
+      return null;
+    }
+
+    let parsedJson: any;
+    try { parsedJson = JSON.parse(jsonMatch[0]); } catch { return null; }
+
+    const rawAction = (parsedJson.action || parsedJson.Action || parsedJson.intent || '').toLowerCase();
+    if (!rawAction) {
+      console.warn('[LocalLLM] JSON 中无 action 字段，跳过');
+      return null;
+    }
+
+    const parsed = parseHermesAction(text, message);
+    console.log(`[LocalLLM] 意图识别成功: ${parsed.action}`);
+
+    return {
+      action: parsed.action,
+      params: parsed.params,
+      response: parsed.response || parsedJson.response || parsedJson.Response || buildAnalysisSummary(parsed.action, parsed.params, ''),
+    };
+  } catch (error) {
+    console.warn('[LocalLLM] 异常:', (error as Error).message?.substring(0, 100));
+    return null;
+  }
+}
+
+/**
  * 根据推理结果自动生成有实质内容的分析总结
  * 替代原来敷衍的"我理解你的需求了，正在帮你处理..."
  */
@@ -349,11 +422,11 @@ function buildAnalysisSummary(action: string, params: Record<string, any>, reaso
  * 从 Hermes CLI 输出中解析 action 和 params
  * 支持多种输出格式：JSON、key:value、行式
  */
-function parseHermesAction(output: string, originalMessage: string): { action: string; params: Record<string, any> } {
+function parseHermesAction(output: string, originalMessage: string): { action: string; params: Record<string, any>; response?: string } {
   const fallback = fallbackAnalyze(originalMessage);
 
-  // 尝试 1: JSON 格式（以 { 或 [ 开头）
-  const jsonMatch = output.match(/\{[\s\S]*?\}/);
+  // 尝试 1: JSON 格式（贪婪匹配，捕获完整JSON含嵌套大括号）
+  const jsonMatch = output.match(/\{[\s\S]*\}/);
   if (jsonMatch) {
     try {
       const parsed = JSON.parse(jsonMatch[0]);
@@ -369,7 +442,7 @@ function parseHermesAction(output: string, originalMessage: string): { action: s
         if (value.duration || value.Duration) params.duration = value.duration || value.Duration;
         if (value.size || value.Size) params.size = value.size || value.Size;
 
-        return { action: mappedAction, params };
+        return { action: mappedAction, params, response: parsed.response || parsed.Response || '' };
       }
     } catch {
       // JSON 解析失败，继续
@@ -482,6 +555,8 @@ function isGeneralQuery(message: string): boolean {
     '告诉', '介绍', '说明', '区别', '定义', '含义',
     '翻译', '计算', '算一下', '等于',
     '你好', '你是谁', '能做什么', '帮助', 'help',
+    'hello', 'hi ', '嗨', '早上好', '下午好', '晚上好', '再见', 'bye',
+    '谢谢', '感谢', 'thanks', 'ok', '好的', '收到',
     '新闻', '热点', '事件',
   ];
 
@@ -626,6 +701,30 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
+    // ===== 优先尝试本地 Qwen3-4B 推理（零成本、低延迟，30秒超时） =====
+    const contextualMessage = memoryContext ? `${message}\n\n${memoryContext}` : message;
+    const localTimeout = new Promise<null>(resolve => setTimeout(() => resolve(null), 30000));
+    const localResult = await Promise.race([
+      callLocalLLM(contextualMessage, history || []),
+      localTimeout,
+    ]);
+    if (localResult) {
+      if (res.headersSent) return;
+      if (ragResult.template) { localResult.params.prompt = (localResult.params.prompt || message) + ' | ' + ragResult.template.prompt.substring(0, 150); }
+      if (ragResult.style) { localResult.params.style = ragResult.style.keywords[0] === '动漫' ? 'anime' : localResult.params.style; }
+      if (ragContext) { localResult.params.ragContext = ragContext; }
+
+      const cpId = createCheckpoint({
+        sessionId, agentName: 'hermes',
+        stage: CHECKPOINT_STAGES.HERMES_INTENT_DETECTED,
+        state: { userMessage: message, action: localResult.action, params: localResult.params, response: localResult.response, modelUsed: 'local' },
+        summary: `本地模型识别意图: ${localResult.action}`,
+      });
+
+      res.json({ success: true, response: localResult.response, action: localResult.action, params: localResult.params, modelUsed: 'local', checkpointId: cpId });
+      return;
+    }
+
     // ===== 调度 Agent 决策：根据场景选择模型 =====
     const supervisor = supervisorRoute({
       messageLength: message.length,
@@ -636,7 +735,6 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
 
     let reasoningResult: any = null;
     // 只有调度 Agent 决定需要深度推理时才用推理模型
-    const contextualMessage = memoryContext ? `${message}\n\n${memoryContext}` : message;
     if (supervisor.useReasoning) {
       reasoningResult = await llmCircuitBreaker.call(
         () => callReasoningLLM(contextualMessage, history || []),
@@ -764,6 +862,7 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
     }
   } catch (error) {
     console.error('Hermes chat error:', error);
+    if (res.headersSent) return;
     const fallbackResult = fallbackAnalyze(req.body.message || '');
     res.json({
       success: true,
@@ -784,6 +883,21 @@ router.post('/chat/stream', async (req: Request, res: Response): Promise<void> =
   const { message, history, sessionId } = req.body;
   if (!message) {
     res.status(400).json({ success: false, error: 'message is required' });
+    return;
+  }
+
+  // 通用问答预检查：非创作类消息直接返回自然语言回复，不走创作流程
+  if (isGeneralQuery(message)) {
+    setSSEHeaders(res);
+    const generalResponse = generateGeneralResponse(message);
+    sendSSEEvent(res, 'status', { status: 'done', message: generalResponse });
+    sendSSEEvent(res, 'result', {
+      action: 'general',
+      params: { query: message },
+      response: generalResponse,
+      contextAnalysis: '',
+    });
+    sendSSEEnd(res);
     return;
   }
 
@@ -814,10 +928,14 @@ router.post('/chat/stream', async (req: Request, res: Response): Promise<void> =
     const fullResponse = await streamLLM(res, messages, { temperature: 0.7, maxTokens: 500 });
     const parsed = parseHermesAction(fullResponse, message);
 
+    // 提取 LLM 返回的 response 字段，避免向用户展示原始 JSON
+    const displayResponse = parsed.response
+      || buildAnalysisSummary(parsed.action, parsed.params, '');
+
     sendSSEEvent(res, 'result', {
       action: parsed.action,
       params: parsed.params,
-      response: fullResponse,
+      response: displayResponse,
       contextAnalysis: '',
     });
 

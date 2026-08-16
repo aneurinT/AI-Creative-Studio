@@ -101,7 +101,7 @@ async function quickTest() {
     console.log(`${Colors.magenta}【${test.label}】${Colors.reset} ${test.prompt}`);
     const start = Date.now();
     const result = await localLlmService.generate(test.prompt, {
-      model: 'qwen3-0.6b',
+      model: 'qwen3-4b',
       maxTokens: 300,
       temperature: 0.3,
     });
@@ -133,7 +133,7 @@ async function videoAnalysisTest(script) {
 
     if (data.success) {
       const model = data.modelUsed;
-      const isLocal = model === 'local-qwen3-0.6b';
+      const isLocal = model === 'local-qwen3-4b';
       const icon = isLocal ? '⚡' : '🔄';
       const color = isLocal ? Colors.green : Colors.yellow;
 
@@ -208,7 +208,7 @@ async function interactiveMode() {
     log('⏳', '生成中...', Colors.gray);
     const start = Date.now();
     const result = await localLlmService.generate(trimmed, {
-      model: 'qwen3-0.6b',
+      model: 'qwen3-4b',
       maxTokens: 500,
       temperature: 0.5,
     });
