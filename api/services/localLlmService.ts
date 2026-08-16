@@ -103,9 +103,27 @@ class LocalLlmService {
   private async ensureLlama(): Promise<any> {
     if (this.llama) return this.llama;
     const { getLlama } = await import('node-llama-cpp');
-    this.llama = await getLlama({
-      maxThreads: Math.max(1, Math.floor(os.cpus().length / 2)),
-    });
+
+    const useVulkan = process.env.LLM_USE_VULKAN === 'true';
+    const useCpu = process.env.LLM_USE_CPU === 'true' && !useVulkan;
+    const maxThreads = useVulkan
+      ? Math.max(2, os.cpus().length)
+      : Math.max(1, Math.floor(os.cpus().length / 2));
+
+    const llamaOptions: Record<string, any> = { maxThreads };
+
+    if (useVulkan) {
+      llamaOptions.gpu = 'vulkan';
+      console.log('[LocalLLM] Vulkan GPU backend enabled');
+    } else if (!useCpu) {
+      llamaOptions.gpu = true;
+      console.log('[LocalLLM] Auto GPU detection enabled');
+    } else {
+      llamaOptions.gpu = false;
+      console.log('[LocalLLM] CPU-only mode (LLM_USE_CPU=true)');
+    }
+
+    this.llama = await getLlama(llamaOptions);
     return this.llama;
   }
 
@@ -181,11 +199,14 @@ class LocalLlmService {
     const startTime = Date.now();
 
     const llama = await this.ensureLlama();
-    const useCpu = process.env.LLM_USE_CPU === 'true';
+    const useVulkan = process.env.LLM_USE_VULKAN === 'true';
+    const useCpu = process.env.LLM_USE_CPU === 'true' && !useVulkan;
     const vramGb = this.detectVramGb();
-    const gpuLayers = useCpu ? 0 : (vramGb >= 4 ? 35 : vramGb >= 2 ? 20 : 0);
+    const gpuLayers = useCpu ? 0
+      : useVulkan ? (vramGb >= 4 ? 99 : vramGb >= 2 ? 35 : 0)
+      : (vramGb >= 4 ? 35 : vramGb >= 2 ? 20 : 0);
 
-    console.log(`[LocalLLM] Loading ${name} (VRAM=${vramGb}GB, gpuLayers=${gpuLayers}, cpuOnly=${useCpu})...`);
+    console.log(`[LocalLLM] Loading ${name} (VRAM=${vramGb}GB, gpuLayers=${gpuLayers}, cpuOnly=${useCpu}, vulkan=${useVulkan})...`);
 
     const model = await llama.loadModel({
       modelPath,
@@ -235,7 +256,7 @@ class LocalLlmService {
       history?: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
     } = {},
   ): Promise<LocalInferenceResult> {
-    const modelName = opts.model || 'qwen3-0.6b';
+    const modelName = opts.model || 'qwen3-4b';
     const totalStart = Date.now();
 
     try {

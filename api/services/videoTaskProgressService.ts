@@ -20,11 +20,15 @@ export interface TaskProgress {
   videoUrl?: string;
   error?: string;
   /** 任务类型，用于恢复时判断是否可重新查询第三方 API */
-  taskType: 'normal' | 'split' | 'merge';
+  taskType: 'normal' | 'split' | 'merge' | 'compare' | 'compare-segment' | 'preview' | 'redraw' | 'storyboard';
   /** 原始请求参数，便于过期后提示用户重新生成 */
   prompt?: string;
   style?: string;
   duration?: string;
+  /** 进度消息（分镜/拆分等阶段性描述） */
+  message?: string;
+  /** 结果 URL（分镜等复合任务的最终输出） */
+  resultUrl?: string;
   /** 创建时间戳，用于自动清理过期记录 */
   createdAt: number;
   /** 最后更新时间戳 */
@@ -123,7 +127,7 @@ export function getTaskProgress(taskId: string): TaskProgress | undefined {
 /** 设置/更新任务进度 */
 export function setTaskProgress(
   taskId: string,
-  progress: Partial<TaskProgress> & { taskType?: 'normal' | 'split' | 'merge' },
+  progress: Partial<TaskProgress>,
 ): void {
   const existing = taskCache[taskId];
 
@@ -137,6 +141,8 @@ export function setTaskProgress(
     prompt: progress.prompt ?? existing?.prompt,
     style: progress.style ?? existing?.style,
     duration: progress.duration ?? existing?.duration,
+    message: progress.message ?? existing?.message,
+    resultUrl: progress.resultUrl ?? existing?.resultUrl,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };

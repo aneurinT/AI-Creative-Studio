@@ -588,6 +588,33 @@ Agent 请求
 | ImageCreator | `callLocalLlmForImageAnalysis` | JSON prompt+style+composition |
 | VideoEditor | `callLocalLlmForVideoEdit` | JSON action+params+analysis |
 
+### 稳定性测试（`pnpm llm:test`）
+
+8 个测试用例覆盖 4 个 Agent，清理磁盘后（30GB→5.5GB）复测，全部通过：
+
+```
+总测试数:       8
+本地模型使用:   8/8 (100%)
+本地模型成功:   8/8 (100%)
+降级到云端:     0/8
+异常失败:       0/8
+平均耗时:       60.6s/次（CPU 推理）
+总耗时:         484.6s
+```
+
+| Agent | 用例 | 耗时 | 验证 |
+|-------|------|------|------|
+| StoryWriter | 樱花女孩跳舞 | 82.4s | 场景✓ 关键词✓ 128字 |
+| StoryWriter | 橘猫晒太阳 | 69.4s | 场景✓ 关键词✓ 107字 |
+| VideoMaker | 海洋日落 10s | 38.5s | 6/6 英文关键词 (100%) |
+| VideoMaker | 城市夜景 15s | 45.8s | 5/6 英文关键词 (83%) |
+| ImageCreator | 赛博朋克 | 62.7s | 5/5 关键词 (100%), style=cyberpunk |
+| ImageCreator | 雪山湖泊倒影 | 75.3s | 4/6 关键词 (67%) |
+| VideoEditor | 剪掉前5秒 | 59.9s | action=trim, params={0,5} |
+| VideoEditor | 添加字幕 | 50.6s | action=subtitle, text=大家好... |
+
+**结论: ✅ 稳定 — 本地模型接入可靠，可放心使用**
+
 ### 每个 Agent 的上下文构建
 
 ```
@@ -711,9 +738,9 @@ toolRegistry.register({
 - 滑动窗口限流（全局 200 req/min，LLM 20 req/min）
 - LLM 调用队列（`llmQueue`，maxConcurrent=3，排队超时 60s）
 - 熔断器（`llmCircuitBreaker`，连续失败 5 次熔断，30s 恢复）
-- 本地模型加载锁（`loadingPromises`，并发请求共享同一次加载）
-- 本地推理串行队列（`inferenceChain`，避免 node-llama-cpp 序列竞争）
-- 请求超时保护（60 秒）
+- 本地模型加载锁（`loadingPromises`，并发请求共享同一次加载，重复加载 3 次→1 次，省 22s）
+- 本地推理串行队列（`inferenceChain`，解决 node-llama-cpp "No sequences left" + "DisposedError"）
+- 请求超时保护：普通路由 60s，Agent 路由 180s（适配本地模型 CPU 推理 ~80s/次）
 - 连接追踪
 
 ---
@@ -810,13 +837,16 @@ XIAOHONGSHU_CLIENT_KEY=your_xhs_key           # 小红书开放平台
 | **数据库表** | 13 张（JSON/SQLite 双模式） |
 | **推理后端** | 可插拔（LTX 已实现，SVD 可扩展） |
 | **部署形态** | 4 种（Docker / Electron / Vercel / 传统） |
+| **项目体积** | 5.5 GB（优化后，含 2.3GB 本地模型 + 1.3GB node_modules） |
+| **本地模型稳定性** | 8/8 (100%) 通过，4 个 Agent 全覆盖（见稳定性测试） |
+| **本地模型平均耗时** | 60.6s/次（CPU 推理，i7-10875H） |
 | **TypeScript** | 严格模式 |
 
 ---
 
 ## 📝 更新日志
 
-### v2.2 (2026-08) — 本地 LLM 推理集成
+### v2.2 (2026-08) — 本地 LLM 推理集成 + 磁盘优化
 
 - 🏠 **本地 LLM 推理服务**：Qwen3-4B GGUF 量化模型（2.3GB），node-llama-cpp v3 引擎，CPU/GPU 混合推理
 - 🤖 **4 个 Agent 全接入本地模型**：StoryWriter / VideoMaker / ImageCreator / VideoEditor 均采用本地优先→云端降级策略
@@ -824,7 +854,15 @@ XIAOHONGSHU_CLIENT_KEY=your_xhs_key           # 小红书开放平台
 - 🔒 **加载锁优化**：`loadingPromises` Map 让并发请求共享同一次模型加载，消除重复加载（3 次→1 次，省 22s）
 - 🔗 **推理串行队列**：`inferenceChain` 链式 Promise，解决 node-llama-cpp 序列竞争（"No sequences left" + "DisposedError"）
 - 🛡️ **llmQueue 队列启用**：`callReasoningAgent` / `callHermesWithContext` 通过 `llmQueue.enqueue()` + `llmCircuitBreaker.call()` 包裹云端 API 调用
+- ⏱️ **Agent 路由超时延长**：普通路由 60s，Agent 路由 180s（适配本地模型 CPU 推理 ~80s/次）
 - 🔧 **一键管理工具**：`pnpm llm` 交互式管理、`pnpm llm:test` 批量测试、`pnpm download-models` 模型下载
+- ✅ **本地模型稳定性测试通过**：8/8 (100%) 通过，4 Agent 全覆盖，平均 60.6s/次（CPU），详见下方测试结果
+- 📦 **磁盘优化 30GB → 5.5GB（省 25GB）**：
+  - 删除未使用的 Qwen3-0.6B 全量化版本目录（10.4 GB）和单独的 0.6B GGUF 文件（610 MB），MODEL_REGISTRY 仅保留 Qwen3-4B
+  - 清理旧生成媒体（api/public videos/images/uploads 506 MB）和临时视频（temp_videos 62 MB）
+  - 删除停用的 ModelScope Python SDK（api/pylibs 62 MB），下载脚本已改用纯 HTTP
+  - 清理构建产物（dist/dist-electron）、Vite 缓存（.vite）、5 个临时分析目录
+  - `.gitignore` 新增排除规则：GGUF 模型、pylibs、temp_videos、public 媒体、构建产物
 
 ### v2.1 (2026-08) — 架构与性能优化
 

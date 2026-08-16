@@ -4,7 +4,8 @@ import { generateSplitVideo } from '../services/videoSplitService.js'
 import { getVideoHistory, addToVideoHistory, deleteFromVideoHistory, clearVideoHistory } from '../services/videoHistoryService.js'
 import { getPendingTasks, addPendingTask, removePendingTask, clearAllPendingTasks, updateTaskStatus, cleanStaleTasks } from '../services/videoTaskService.js'
 import { getTaskProgress, setTaskProgress, updateTaskProgress, removeTaskProgress, checkTaskExists } from '../services/videoTaskProgressService.js'
-import { createFreeVideoTask, checkFreeVideoStatus, generateZhipuVideo, generateWanxVideo, checkZhipuVideoStatus, checkWanxVideoStatus, generateSeedanceVideo } from '../services/freeVideoService.js'
+import { createFreeVideoTask, checkFreeVideoStatus, generateZhipuVideo, generateWanxVideo, checkZhipuVideoStatus, checkWanxVideoStatus, generateSeedanceVideo, checkSeedanceStatus } from '../services/freeVideoService.js'
+import { recommendEngine, listAvailableEngines } from '../services/engineCapabilityMatrix.js'
 import fetch from 'node-fetch'
 import fs from 'fs'
 import path from 'path'
@@ -46,11 +47,12 @@ async function checkAgnesReachable(): Promise<boolean> {
 // 各模型单次最大视频时长（秒）
 // ========================
 const MODEL_MAX_DURATION: Record<string, number> = {
-  'cogvideox-flash': 6,   // 智谱 CogVideoX-Flash（免费）
-  'cogvideox-3': 10,      // 智谱 CogVideoX-3（付费）
-  'wanx-video': 10,       // 通义万相视频
-  'seedance': 10,         // Seedance 2.0
-  'agnes': 18,            // Agnes Video V2.0
+  'cogvideox': 6,         // 智谱 CogVideoX-Flash（免费，API 不接受 duration 参数，固定 6 秒）
+  'cogvideox-flash': 6,  // 兼容旧键名
+  'cogvideox-3': 10,     // 智谱 CogVideoX-3（付费）
+  'wanx-video': 10,      // 通义万相视频
+  'seedance': 15,        // Seedance 2.0（API 支持 5/10/15 秒）
+  'agnes': 18,           // Agnes Video V2.0
 }
 
 /**
@@ -765,7 +767,6 @@ async function tryFreeVideoFallback(
       const seedanceResult = await generateSeedanceVideo({
         prompt: style ? `${prompt}，${style}` : prompt,
         duration: sdDuration,
-        style: style || '',
       })
       if (seedanceResult.success && seedanceResult.taskId) {
         const taskId = `seedance-fallback-${seedanceResult.taskId}`
@@ -793,6 +794,69 @@ async function tryFreeVideoFallback(
 }
 
 /**
+ * 用 LLM 生成剧情分镜：将用户 prompt 拆分为 N 个不同场景描述
+ * 每个场景有独立的画面描述，拼接后形成完整故事线
+ * 如果 LLM 不可用，回退到原始 prompt + 片段后缀
+ */
+async function generateStorylineScenes(
+  prompt: string,
+  style: string,
+  segmentCount: number,
+): Promise<string[]> {
+  const fallback = Array.from({ length: segmentCount }, (_, i) =>
+    segmentCount > 1 ? `${prompt}${style ? `，${style}` : ''} (片段${i + 1}/${segmentCount})` : prompt,
+  )
+
+  const zhipuApiKey = process.env.ZHIPU_API_KEY
+  if (!zhipuApiKey) return fallback
+
+  try {
+    const systemPrompt = `你是一位专业的视频分镜师。将用户的视频描述拆分为${segmentCount}个连续的场景，每个场景6秒。
+要求：
+1. 每个场景有独立的画面描述，但组合起来是一个完整的故事
+2. 场景之间有逻辑连贯性（时间推移、视角变化、情节推进）
+3. 每个场景描述要具体、有画面感，适合AI视频生成
+4. 只返回JSON数组格式，不要其他文字
+5. 示例格式：["场景1描述","场景2描述","场景3描述"]`
+
+    const userPrompt = `视频描述：${prompt}${style ? `\n风格要求：${style}` : ''}\n请拆分为${segmentCount}个场景。`
+
+    const response = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${zhipuApiKey}`,
+      },
+      body: JSON.stringify({
+        model: 'glm-4-flash',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.8,
+        max_tokens: 800,
+      }),
+    })
+
+    if (!response.ok) return fallback
+
+    const data = await response.json() as Record<string, any>
+    const content = data.choices?.[0]?.message?.content?.trim() || ''
+
+    const jsonMatch = content.match(/\[[\s\S]*\]/)
+    if (!jsonMatch) return fallback
+
+    const scenes = JSON.parse(jsonMatch[0]) as string[]
+    if (!Array.isArray(scenes) || scenes.length < segmentCount) return fallback
+
+    return scenes.slice(0, segmentCount).map(s => typeof s === 'string' ? s : String(s))
+  } catch (error) {
+    console.error('[Storyline] LLM generation failed:', error)
+    return fallback
+  }
+}
+
+/**
  * 智谱拆分降级：长视频用智谱 CogVideoX-Flash 并行生成多段，然后拼接
  * 智谱完全免费，优先于万相
  */
@@ -802,17 +866,19 @@ async function tryZhipuSplitFallback(
   style: string,
   segmentCount: number,
   segDuration: number,
+  targetDuration?: number,
 ) {
-  const fullPrompt = style ? `${prompt}，${style}` : prompt
+  updateTaskProgress(taskId, { progress: 3, status: 'processing', message: '正在生成剧情分镜...' })
+
+  const scenePrompts = await generateStorylineScenes(prompt, style, segmentCount)
 
   const segments: { prompt: string; duration: number }[] = []
   for (let i = 0; i < segmentCount; i++) {
-    const segSuffix = segmentCount > 1 ? ` (片段${i + 1}/${segmentCount})` : ''
-    segments.push({ prompt: `${fullPrompt}${segSuffix}`, duration: segDuration })
+    segments.push({ prompt: scenePrompts[i] || prompt, duration: segDuration })
   }
 
-  updateTaskProgress(taskId, { progress: 5, status: 'processing' })
-  console.log(`[ZhipuSplit] Generating ${segmentCount} segments in parallel...`)
+  updateTaskProgress(taskId, { progress: 5, status: 'processing', message: `剧情分镜完成，开始生成 ${segmentCount} 个片段...` })
+  console.log(`[ZhipuSplit] Generating ${segmentCount} segments with storyline...`)
 
   const segmentResults: Array<{ success: boolean; taskId?: string; error?: string }> = []
   // 智谱 CogVideoX-Flash 免费 API 限流严格，改为串行生成每段间隔 8 秒
@@ -822,7 +888,7 @@ async function tryZhipuSplitFallback(
     const batchEnd = Math.min(batch + MAX_PARALLEL, segmentCount)
     const batchSegments = segments.slice(batch, batchEnd)
     const batchProgress = 10 + Math.round((batch / segmentCount) * 40)
-    updateTaskProgress(taskId, { progress: batchProgress, status: `生成片段 ${batch + 1}/${segmentCount}...` })
+    updateTaskProgress(taskId, { progress: batchProgress, status: 'processing', message: `生成片段 ${batch + 1}/${segmentCount}...` })
 
     const batchResults = await Promise.all(
       batchSegments.map(async (seg) => {
@@ -840,13 +906,13 @@ async function tryZhipuSplitFallback(
     segmentResults.push(...batchResults)
     // 每段之间间隔 8 秒，避免触发智谱免费 API 限流
     if (batch + MAX_PARALLEL < segmentCount) {
-      updateTaskProgress(taskId, { progress: batchProgress + 5, status: `等待限流冷却...` })
+      updateTaskProgress(taskId, { progress: batchProgress + 5, status: 'processing', message: `等待限流冷却...` })
       await new Promise(r => setTimeout(r, 8000))
     }
   }
 
   const videoPaths: string[] = []
-  updateTaskProgress(taskId, { progress: 50, status: '等待片段完成...' })
+  updateTaskProgress(taskId, { progress: 50, status: 'processing', message: '等待片段完成...' })
 
   for (let i = 0; i < segmentResults.length; i++) {
     const segResult = segmentResults[i]
@@ -885,7 +951,7 @@ async function tryZhipuSplitFallback(
       }
     }
 
-    updateTaskProgress(taskId, { progress: 50 + Math.round(((i + 1) / segmentResults.length) * 30), status: `片段 ${i + 1}/${segmentResults.length} 完成` })
+    updateTaskProgress(taskId, { progress: 50 + Math.round(((i + 1) / segmentResults.length) * 30), status: 'processing', message: `片段 ${i + 1}/${segmentResults.length} 完成` })
   }
 
   if (videoPaths.length === 0) {
@@ -894,12 +960,12 @@ async function tryZhipuSplitFallback(
     return
   }
 
-  updateTaskProgress(taskId, { progress: 85, status: '正在拼接视频片段...' })
+  updateTaskProgress(taskId, { progress: 85, status: 'processing', message: '正在拼接视频片段...' })
 
   try {
-    const finalUrl = await mergeZhipuSegments(videoPaths, taskId)
+    const finalUrl = await mergeZhipuSegments(videoPaths, taskId, targetDuration)
     if (finalUrl) {
-      addToVideoHistory({ prompt, style, duration: String(segmentCount * segDuration), videoUrl: finalUrl })
+      addToVideoHistory({ prompt, style, duration: targetDuration ? String(targetDuration) : String(segmentCount * segDuration), videoUrl: finalUrl })
       setTaskProgress(taskId, { progress: 100, status: 'completed', videoUrl: finalUrl, taskType: 'normal' })
       removePendingTask(taskId)
     } else {
@@ -961,12 +1027,15 @@ function getFfmpegPath(): string {
   return 'ffmpeg'
 }
 
-/** ffmpeg 拼接智谱视频片段 */
-async function mergeZhipuSegments(segmentPaths: string[], taskId: string): Promise<string | null> {
+/** ffmpeg 拼接智谱视频片段，可选裁剪到目标时长 */
+async function mergeZhipuSegments(segmentPaths: string[], taskId: string, targetDuration?: number): Promise<string | null> {
   const outputPath = path.join(__dirname, `../public/videos/zhipusplit_${taskId}.mp4`)
   await fs.promises.mkdir(path.dirname(outputPath), { recursive: true })
 
   if (segmentPaths.length === 1) {
+    if (targetDuration) {
+      return trimVideo(segmentPaths[0], outputPath, targetDuration, taskId)
+    }
     await fs.promises.copyFile(segmentPaths[0], outputPath)
     return `/videos/zhipusplit_${taskId}.mp4`
   }
@@ -981,23 +1050,59 @@ async function mergeZhipuSegments(segmentPaths: string[], taskId: string): Promi
   const listContent = segmentPaths.map(p => `file '${p.replace(/\\/g, '/')}'`).join('\n')
   await fs.promises.writeFile(listPath, listContent)
 
+  const concatOutput = targetDuration
+    ? path.join(tempDir, `zhipusplit_concat_${taskId}.mp4`)
+    : outputPath
+
   return new Promise((resolve) => {
-    const proc = spawn(ffmpegPath, ['-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', '-y', outputPath])
+    const proc = spawn(ffmpegPath, ['-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', '-y', concatOutput])
     proc.stderr?.on('data', (d: Buffer) => console.log(`[ffmpeg] ${d.toString().substring(0, 200)}`))
-    proc.on('close', (code: number) => {
+    proc.on('close', async (code: number) => {
       fs.promises.unlink(listPath).catch(() => {})
-      console.log(`[ffmpeg] exit code ${code}`)
-      resolve(code === 0 ? `/videos/zhipusplit_${taskId}.mp4` : null)
+      console.log(`[ffmpeg] concat exit code ${code}`)
+
+      if (code !== 0) {
+        resolve(null)
+        return
+      }
+
+      if (!targetDuration) {
+        resolve(`/videos/zhipusplit_${taskId}.mp4`)
+        return
+      }
+
+      const trimmedUrl = await trimVideo(concatOutput, outputPath, targetDuration, taskId)
+      fs.promises.unlink(concatOutput).catch(() => {})
+      resolve(trimmedUrl)
     })
     proc.on('error', (e) => {
       console.error(`[ffmpeg] spawn error:`, e.message)
-      // ffmpeg 不可用时返回第一个片段
       fs.promises.unlink(listPath).catch(() => {})
       fs.promises.copyFile(segmentPaths[0], outputPath).then(() => {
         resolve(`/videos/zhipusplit_${taskId}.mp4`)
       }).catch(() => resolve(null))
     })
     setTimeout(() => { proc.kill(); resolve(null) }, 60000)
+  })
+}
+
+/** ffmpeg 裁剪视频到指定时长 */
+async function trimVideo(inputPath: string, outputPath: string, targetDuration: number, taskId: string): Promise<string | null> {
+  const ffmpegPath = getFfmpegPath()
+  const { spawn } = await import('child_process')
+
+  return new Promise((resolve) => {
+    const proc = spawn(ffmpegPath, ['-i', inputPath, '-t', String(targetDuration), '-c', 'copy', '-y', outputPath])
+    proc.stderr?.on('data', (d: Buffer) => console.log(`[ffmpeg trim] ${d.toString().substring(0, 200)}`))
+    proc.on('close', (code: number) => {
+      console.log(`[ffmpeg trim] exit code ${code}`)
+      resolve(code === 0 ? `/videos/zhipusplit_${taskId}.mp4` : null)
+    })
+    proc.on('error', (e) => {
+      console.error(`[ffmpeg trim] spawn error:`, e.message)
+      resolve(null)
+    })
+    setTimeout(() => { proc.kill(); resolve(null) }, 30000)
   })
 }
 
@@ -1011,18 +1116,19 @@ async function tryWanxSplitFallback(
   style: string,
   segmentCount: number,
   segDuration: number,
+  targetDuration?: number,
 ) {
-  const fullPrompt = style ? `${prompt}，${style}` : prompt
+  updateTaskProgress(taskId, { progress: 3, status: 'processing', message: '正在生成剧情分镜...' })
 
-  // 生成简单分镜（无需 AI 故事板，直接用同一 prompt）
+  const scenePrompts = await generateStorylineScenes(prompt, style, segmentCount)
+
   const segments: { prompt: string; duration: number }[] = []
   for (let i = 0; i < segmentCount; i++) {
-    const segSuffix = segmentCount > 1 ? ` (片段${i + 1}/${segmentCount})` : ''
-    segments.push({ prompt: `${fullPrompt}${segSuffix}`, duration: segDuration })
+    segments.push({ prompt: scenePrompts[i] || prompt, duration: segDuration })
   }
 
-  updateTaskProgress(taskId, { progress: 5, status: 'processing' })
-  console.log(`[WanxSplit] Generating ${segmentCount} segments in parallel...`)
+  updateTaskProgress(taskId, { progress: 5, status: 'processing', message: `剧情分镜完成，开始生成 ${segmentCount} 个片段...` })
+  console.log(`[WanxSplit] Generating ${segmentCount} segments with storyline...`)
 
   // 并行生成所有片段
   const segmentResults: Array<{ success: boolean; taskId?: string; error?: string }> = []
@@ -1033,7 +1139,7 @@ async function tryWanxSplitFallback(
     const batchSegments = segments.slice(batch, batchEnd)
     const batchProgress = 10 + Math.round((batch / segmentCount) * 40)
 
-    updateTaskProgress(taskId, { progress: batchProgress, status: `生成片段 ${batch + 1}-${batchEnd}/${segmentCount}...` })
+    updateTaskProgress(taskId, { progress: batchProgress, status: 'processing', message: `生成片段 ${batch + 1}-${batchEnd}/${segmentCount}...` })
 
     const batchResults = await Promise.all(
       batchSegments.map(async (seg, idx) => {
@@ -1062,7 +1168,7 @@ async function tryWanxSplitFallback(
   const videoPaths: string[] = []
   const failedCount = segmentResults.filter(r => !r.success).length
 
-  updateTaskProgress(taskId, { progress: 50, status: `等待 ${segmentResults.length - failedCount} 个片段完成...` })
+  updateTaskProgress(taskId, { progress: 50, status: 'processing', message: `等待 ${segmentResults.length - failedCount} 个片段完成...` })
 
   for (let i = 0; i < segmentResults.length; i++) {
     const segResult = segmentResults[i]
@@ -1105,7 +1211,7 @@ async function tryWanxSplitFallback(
     }
 
     const segProgress = 50 + Math.round(((i + 1) / segmentResults.length) * 30)
-    updateTaskProgress(taskId, { progress: segProgress, status: `片段 ${i + 1}/${segmentResults.length} 完成` })
+    updateTaskProgress(taskId, { progress: segProgress, status: 'processing', message: `片段 ${i + 1}/${segmentResults.length} 完成` })
   }
 
   if (videoPaths.length === 0) {
@@ -1115,12 +1221,12 @@ async function tryWanxSplitFallback(
   }
 
   // 拼接片段
-  updateTaskProgress(taskId, { progress: 85, status: '正在拼接视频片段...' })
+  updateTaskProgress(taskId, { progress: 85, status: 'processing', message: '正在拼接视频片段...' })
 
   try {
-    const finalUrl = await mergeWanxSegments(videoPaths, taskId)
+    const finalUrl = await mergeWanxSegments(videoPaths, taskId, targetDuration)
     if (finalUrl) {
-      addToVideoHistory({ prompt, style, duration: String(segmentCount * segDuration), videoUrl: finalUrl })
+      addToVideoHistory({ prompt, style, duration: targetDuration ? String(targetDuration) : String(segmentCount * segDuration), videoUrl: finalUrl })
       setTaskProgress(taskId, { progress: 100, status: 'completed', videoUrl: finalUrl, taskType: 'normal' })
       removePendingTask(taskId)
       console.log(`[WanxSplit] Complete: ${finalUrl} (${videoPaths.length}/${segmentCount} segments)`)
@@ -1140,11 +1246,14 @@ async function tryWanxSplitFallback(
 /**
  * 使用 ffmpeg concat 拼接万相视频片段
  */
-async function mergeWanxSegments(segmentPaths: string[], taskId: string): Promise<string | null> {
+async function mergeWanxSegments(segmentPaths: string[], taskId: string, targetDuration?: number): Promise<string | null> {
   const outputPath = path.join(__dirname, `../public/videos/wanxsplit_${taskId}.mp4`)
   await fs.promises.mkdir(path.dirname(outputPath), { recursive: true })
 
   if (segmentPaths.length === 1) {
+    if (targetDuration) {
+      return trimVideo(segmentPaths[0], outputPath, targetDuration, taskId)
+    }
     await fs.promises.copyFile(segmentPaths[0], outputPath)
     return `/videos/wanxsplit_${taskId}.mp4`
   }
@@ -1159,22 +1268,34 @@ async function mergeWanxSegments(segmentPaths: string[], taskId: string): Promis
   const listContent = segmentPaths.map(p => `file '${p.replace(/\\/g, '/')}'`).join('\n')
   await fs.promises.writeFile(listPath, listContent)
 
+  const concatOutput = targetDuration
+    ? path.join(tempDir, `wanxsplit_concat_${taskId}.mp4`)
+    : outputPath
+
   return new Promise((resolve) => {
     const proc = spawn(ffmpegPath, [
       '-f', 'concat', '-safe', '0',
       '-i', listPath,
       '-c', 'copy',
       '-y',
-      outputPath,
+      concatOutput,
     ])
 
-    proc.on('close', (code: number) => {
+    proc.on('close', async (code: number) => {
       fs.promises.unlink(listPath).catch(() => {})
-      if (code === 0) {
-        resolve(`/videos/wanxsplit_${taskId}.mp4`)
-      } else {
+      if (code !== 0) {
         resolve(null)
+        return
       }
+
+      if (!targetDuration) {
+        resolve(`/videos/wanxsplit_${taskId}.mp4`)
+        return
+      }
+
+      const trimmedUrl = await trimVideo(concatOutput, outputPath, targetDuration, taskId)
+      fs.promises.unlink(concatOutput).catch(() => {})
+      resolve(trimmedUrl)
     })
 
     proc.on('error', () => {
@@ -1194,7 +1315,7 @@ async function mergeWanxSegments(segmentPaths: string[], taskId: string): Promis
 async function pollFreeVideoFallback(
   taskId: string,
   providerTaskId: string,
-  model: 'cogvideox' | 'wanx-video',
+  model: 'cogvideox' | 'wanx-video' | 'seedance',
   prompt: string,
   style: string,
   duration: string,
@@ -1213,7 +1334,9 @@ async function pollFreeVideoFallback(
     try {
       const status = model === 'cogvideox'
         ? await checkZhipuVideoStatus(providerTaskId)
-        : await checkWanxVideoStatus(providerTaskId)
+        : model === 'seedance'
+          ? await checkSeedanceStatus(providerTaskId)
+          : await checkWanxVideoStatus(providerTaskId)
 
       if (status.status === 'completed' && status.videoUrl) {
         // 下载视频
@@ -1507,7 +1630,9 @@ router.post('/free', async (req: Request, res: Response): Promise<void> => {
         const lastSegDuration = totalDuration % segDuration || segDuration
         pollSeedanceSplitTask(masterTaskId, prompt, style || '', totalDuration, segmentCount, segDuration, lastSegDuration, imageUrl || imageUrls?.[0])
       } else if (model === 'cogvideox') {
-        tryZhipuSplitFallback(masterTaskId, prompt, style || '', segmentCount, segDuration)
+        tryZhipuSplitFallback(masterTaskId, prompt, style || '', segmentCount, segDuration, totalDuration)
+      } else if (model === 'wanx-video') {
+        tryWanxSplitFallback(masterTaskId, prompt, style || '', segmentCount, segDuration, totalDuration)
       }
       return
     }
@@ -1973,5 +2098,540 @@ async function pollStoryboardTask(
     segPaths.forEach(p => { try { fs.unlinkSync(p); } catch {} });
   }
 }
+
+// ========================
+// 引擎能力矩阵与智能推荐
+// ========================
+
+/** 列出所有可用引擎及其能力标签 */
+router.get('/engines', (_req: Request, res: Response) => {
+  const engines = listAvailableEngines('video');
+  res.json({
+    success: true,
+    engines: engines.map((e) => ({
+      id: e.id,
+      displayName: e.displayName,
+      maxDurationSec: e.maxDurationSec,
+      resolutions: e.resolutions,
+      frameRate: e.frameRate,
+      nativeAudio: e.nativeAudio,
+      imageToVideo: e.imageToVideo,
+      firstLastFrame: e.firstLastFrame,
+      free: e.free,
+      styleStrengths: e.styleStrengths,
+      speedScore: e.speedScore,
+      qualityScore: e.qualityScore,
+      description: e.description,
+    })),
+  });
+});
+
+/** 根据 prompt 语义智能推荐最优引擎 */
+router.post('/recommend', (req: Request, res: Response) => {
+  try {
+    const { prompt, duration, preferQuality, preferSpeed, preferFree, requireAudio, requireImageToVideo } = req.body;
+
+    if (!prompt) {
+      res.status(400).json({ success: false, error: 'prompt is required' });
+      return;
+    }
+
+    const recommendations = recommendEngine(prompt, {
+      duration: typeof duration === 'number' ? duration : parseInt(String(duration)) || 10,
+      preferQuality: preferQuality === true,
+      preferSpeed: preferSpeed === true,
+      preferFree: preferFree === true,
+      requireAudio: requireAudio === true,
+      requireImageToVideo: requireImageToVideo === true,
+    });
+
+    res.json({
+      success: true,
+      recommendations,
+      topPick: recommendations[0] || null,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: (error as Error).message });
+  }
+});
+
+// ========================
+// A/B 对比生成：同一 prompt 用不同引擎生成
+// ========================
+
+router.post('/compare', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { prompt, style, duration, engines } = req.body as {
+      prompt: string;
+      style?: string;
+      duration?: string;
+      engines?: string[];
+    };
+
+    if (!prompt) {
+      res.status(400).json({ success: false, error: 'prompt is required' });
+      return;
+    }
+
+    const targetDuration = duration || '10';
+    const targetEngines = engines && engines.length > 0
+      ? engines.slice(0, 3)
+      : recommendEngine(prompt, { duration: parseInt(targetDuration) })
+          .slice(0, 2)
+          .map((r) => r.engine);
+
+    if (targetEngines.length === 0) {
+      res.status(400).json({ success: false, error: '没有可用的引擎进行对比生成' });
+      return;
+    }
+
+    const compareId = `compare-${Date.now()}`;
+    const tasks: Array<{ engine: string; taskId: string; status: string }> = [];
+
+    setTaskProgress(compareId, {
+      progress: 0,
+      status: 'processing',
+      taskType: 'compare',
+      prompt,
+      style: style || '',
+      duration: targetDuration,
+    });
+
+    for (const engine of targetEngines) {
+      const engineTaskId = `${compareId}-${engine}`;
+      tasks.push({ engine, taskId: engineTaskId, status: 'pending' });
+
+      setTaskProgress(engineTaskId, {
+        progress: 0,
+        status: 'processing',
+        taskType: 'compare-segment',
+        prompt,
+        style: style || '',
+        duration: targetDuration,
+      });
+
+      const fullPrompt = style ? `${prompt}，${style}` : prompt;
+
+      setTimeout(async () => {
+        try {
+          if (engine === 'agnes') {
+            const result = await createVideoTaskAsync(prompt, style || '', targetDuration, false);
+            if (result.success && result.taskId) {
+              const agnesTaskId = result.taskId;
+              const pollInterval = setInterval(() => {
+                const progress = getTaskProgress(agnesTaskId);
+                if (progress?.status === 'completed' && progress.videoUrl) {
+                  clearInterval(pollInterval);
+                  setTaskProgress(engineTaskId, { progress: 100, status: 'completed', videoUrl: progress.videoUrl, taskType: 'compare-segment' });
+                } else if (progress?.status === 'failed') {
+                  clearInterval(pollInterval);
+                  setTaskProgress(engineTaskId, { progress: 0, status: 'failed', error: progress.error, taskType: 'compare-segment' });
+                } else if (progress) {
+                  updateTaskProgress(engineTaskId, { progress: progress.progress || 0 });
+                }
+              }, 3000);
+            } else {
+              setTaskProgress(engineTaskId, { progress: 0, status: 'failed', error: result.error || '引擎启动失败', taskType: 'compare-segment' });
+            }
+          } else {
+            const result = await createFreeVideoTask({
+              model: engine as 'cogvideox' | 'wanx-video' | 'seedance',
+              prompt: fullPrompt,
+              duration: parseInt(targetDuration),
+              style: style || '',
+            });
+
+            if (result.success && result.taskId) {
+              for (let poll = 0; poll < 120; poll++) {
+                await new Promise((r) => setTimeout(r, 3000));
+                const status = await checkFreeVideoStatus(engine as 'cogvideox' | 'wanx-video' | 'seedance', result.taskId);
+                if (status.status === 'completed' && status.videoUrl) {
+                  const resp = await fetch(status.videoUrl, { redirect: 'follow' });
+                  if (resp.ok) {
+                    const buf = Buffer.from(await resp.arrayBuffer());
+                    const videoDir = path.join(__dirname, '../public/videos');
+                    await fs.promises.mkdir(videoDir, { recursive: true });
+                    const fileName = `${engineTaskId}.mp4`;
+                    await fs.promises.writeFile(path.join(videoDir, fileName), buf);
+                    setTaskProgress(engineTaskId, {
+                      progress: 100,
+                      status: 'completed',
+                      videoUrl: `/videos/${fileName}`,
+                      taskType: 'compare-segment',
+                    });
+                  }
+                  break;
+                }
+                if (status.status === 'failed') {
+                  setTaskProgress(engineTaskId, { progress: 0, status: 'failed', error: status.error || '生成失败', taskType: 'compare-segment' });
+                  break;
+                }
+                updateTaskProgress(engineTaskId, { progress: Math.min(10 + poll * 2, 90) });
+              }
+            } else {
+              setTaskProgress(engineTaskId, { progress: 0, status: 'failed', error: result.error || '引擎启动失败', taskType: 'compare-segment' });
+            }
+          }
+        } catch (e) {
+          setTaskProgress(engineTaskId, { progress: 0, status: 'failed', error: (e as Error).message, taskType: 'compare-segment' });
+        }
+      }, 100 * targetEngines.indexOf(engine));
+    }
+
+    setTaskProgress(compareId, {
+      progress: 5,
+      status: 'processing',
+      taskType: 'compare',
+      prompt,
+      style: style || '',
+      duration: targetDuration,
+    });
+
+    res.json({
+      success: true,
+      compareId,
+      engines: tasks,
+      message: `正在使用 ${targetEngines.length} 个引擎并行生成，请通过各 taskId 轮询结果`,
+    });
+  } catch (error) {
+    console.error('[Video Compare] Error:', error);
+    res.status(500).json({ success: false, error: (error as Error).message });
+  }
+});
+
+// ========================
+// 低分辨率快速预览模式
+// ========================
+
+router.post('/preview', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { prompt, style, duration } = req.body;
+
+    if (!prompt) {
+      res.status(400).json({ success: false, error: 'prompt is required' });
+      return;
+    }
+
+    const previewDuration = '5';
+    const zhipuKey = process.env.ZHIPU_API_KEY;
+
+    if (!zhipuKey) {
+      res.status(400).json({ success: false, error: '预览模式需要配置 ZHIPU_API_KEY' });
+      return;
+    }
+
+    const previewTaskId = `preview-${Date.now()}`;
+    setTaskProgress(previewTaskId, { progress: 0, status: 'processing', taskType: 'preview', prompt, style: style || '', duration: previewDuration });
+
+    const fullPrompt = style ? `${prompt}，${style}` : prompt;
+
+    setTimeout(async () => {
+      try {
+        const result = await generateZhipuVideo({
+          prompt: fullPrompt,
+          duration: 5,
+        });
+
+        if (result.success && result.taskId) {
+          for (let poll = 0; poll < 60; poll++) {
+            if (getTaskProgress(previewTaskId)?.status === 'cancelled') {
+              removePendingTask(previewTaskId);
+              return;
+            }
+            await new Promise((r) => setTimeout(r, 3000));
+            try {
+              const status = await checkZhipuVideoStatus(result.taskId);
+              if (status.status === 'completed' && status.videoUrl) {
+                const resp = await fetch(status.videoUrl, { redirect: 'follow' });
+                if (resp.ok) {
+                  const buf = Buffer.from(await resp.arrayBuffer());
+                  const videoDir = path.join(__dirname, '../public/videos');
+                  await fs.promises.mkdir(videoDir, { recursive: true });
+                  const fileName = `${previewTaskId}.mp4`;
+                  await fs.promises.writeFile(path.join(videoDir, fileName), buf);
+
+                  const ffmpegPath = getFfmpegPath();
+                  const { spawnSync } = await import('child_process');
+                  const lowResPath = path.join(videoDir, `${previewTaskId}_480p.mp4`);
+                  spawnSync(ffmpegPath, [
+                    '-i', path.join(videoDir, fileName),
+                    '-vf', 'scale=854:480',
+                    '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
+                    '-c:a', 'aac', '-y', lowResPath,
+                  ], { timeout: 30000 });
+
+                  setTaskProgress(previewTaskId, {
+                    progress: 100,
+                    status: 'completed',
+                    videoUrl: fs.existsSync(lowResPath) ? `/videos/${previewTaskId}_480p.mp4` : `/videos/${fileName}`,
+                    taskType: 'preview',
+                  });
+                }
+                break;
+              }
+              if (status.status === 'failed') {
+                setTaskProgress(previewTaskId, { progress: 0, status: 'failed', error: '预览生成失败', taskType: 'preview' });
+                break;
+              }
+              updateTaskProgress(previewTaskId, { progress: Math.min(10 + poll * 3, 90) });
+            } catch {}
+          }
+        } else {
+          setTaskProgress(previewTaskId, { progress: 0, status: 'failed', error: result.error || '预览引擎启动失败', taskType: 'preview' });
+        }
+      } catch (e) {
+        setTaskProgress(previewTaskId, { progress: 0, status: 'failed', error: (e as Error).message, taskType: 'preview' });
+      }
+    }, 100);
+
+    res.json({
+      success: true,
+      taskId: previewTaskId,
+      message: '低分辨率预览生成中（5秒/480p），完成后可确认效果再正式生成',
+    });
+  } catch (error) {
+    console.error('[Video Preview] Error:', error);
+    res.status(500).json({ success: false, error: (error as Error).message });
+  }
+});
+
+// ========================
+// SSE 进度帧预览：实时推送生成进度和缩略图
+// ========================
+
+router.get('/pending/:taskId/preview-stream', async (req: Request, res: Response): Promise<void> => {
+  const { taskId } = req.params;
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+
+  res.write(`event: connected\ndata: ${JSON.stringify({ taskId })}\n\n`);
+
+  let lastProgress = -1;
+  let lastStatus = '';
+  const interval = setInterval(() => {
+    const progress = getTaskProgress(taskId);
+    if (!progress) {
+      res.write(`event: error\ndata: ${JSON.stringify({ error: '任务不存在或已过期' })}\n\n`);
+      clearInterval(interval);
+      res.end();
+      return;
+    }
+
+    const currentProgress = progress.progress || 0;
+    const currentStatus = progress.status || 'processing';
+
+    if (currentProgress !== lastProgress || currentStatus !== lastStatus) {
+      lastProgress = currentProgress;
+      lastStatus = currentStatus;
+
+      res.write(`event: progress\ndata: ${JSON.stringify({
+        progress: currentProgress,
+        status: currentStatus,
+        message: (progress as any).message || '',
+        videoUrl: progress.videoUrl || null,
+      })}\n\n`);
+    }
+
+    if (currentStatus === 'completed' || currentStatus === 'failed') {
+      clearInterval(interval);
+      res.write(`event: done\ndata: ${JSON.stringify({ status: currentStatus, videoUrl: progress.videoUrl || null, error: progress.error || null })}\n\n`);
+      res.end();
+    }
+  }, 2000);
+
+  req.on('close', () => {
+    clearInterval(interval);
+  });
+});
+
+// ========================
+// 区域重绘：对已生成视频的指定时间区间重新生成
+// ========================
+
+router.post('/redraw', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { videoUrl, prompt, style, startTime, endTime, modifyPrompt } = req.body as {
+      videoUrl: string;
+      prompt: string;
+      style?: string;
+      startTime: number;
+      endTime: number;
+      modifyPrompt?: string;
+    };
+
+    if (!videoUrl || !prompt) {
+      res.status(400).json({ success: false, error: 'videoUrl and prompt are required' });
+      return;
+    }
+
+    if (startTime === undefined || endTime === undefined || startTime >= endTime) {
+      res.status(400).json({ success: false, error: '需要有效的 startTime 和 endTime（秒），且 startTime < endTime' });
+      return;
+    }
+
+    const redrawTaskId = `redraw-${Date.now()}`;
+    const segDuration = Math.min(Math.ceil(endTime - startTime), 10);
+
+    setTaskProgress(redrawTaskId, {
+      progress: 0,
+      status: 'processing',
+      taskType: 'redraw',
+      prompt: modifyPrompt || prompt,
+      style: style || '',
+      duration: String(segDuration),
+    });
+
+    const fullPrompt = modifyPrompt
+      ? `${prompt}，${modifyPrompt}`
+      : style
+        ? `${prompt}，${style}`
+        : prompt;
+
+    setTimeout(async () => {
+      try {
+        const zhipuKey = process.env.ZHIPU_API_KEY;
+        if (!zhipuKey) {
+          setTaskProgress(redrawTaskId, { progress: 0, status: 'failed', error: '区域重绘需要 ZHIPU_API_KEY', taskType: 'redraw' });
+          return;
+        }
+
+        const result = await generateZhipuVideo({
+          prompt: fullPrompt,
+          duration: segDuration,
+        });
+
+        if (result.success && result.taskId) {
+          for (let poll = 0; poll < 60; poll++) {
+            if (getTaskProgress(redrawTaskId)?.status === 'cancelled') {
+              removePendingTask(redrawTaskId);
+              return;
+            }
+            await new Promise((r) => setTimeout(r, 3000));
+            try {
+              const status = await checkZhipuVideoStatus(result.taskId);
+              if (status.status === 'completed' && status.videoUrl) {
+                const newSegResp = await fetch(status.videoUrl, { redirect: 'follow' });
+                if (!newSegResp.ok) {
+                  setTaskProgress(redrawTaskId, { progress: 0, status: 'failed', error: '下载新片段失败', taskType: 'redraw' });
+                  break;
+                }
+                const newSegBuf = Buffer.from(await newSegResp.arrayBuffer());
+
+                const origVideoPath = path.join(__dirname, '..', 'public', videoUrl.replace(/^\//, ''));
+                if (!fs.existsSync(origVideoPath)) {
+                  setTaskProgress(redrawTaskId, { progress: 0, status: 'failed', error: `原始视频不存在: ${origVideoPath}`, taskType: 'redraw' });
+                  break;
+                }
+
+                const tempDir = path.join(__dirname, '../data/temp_videos');
+                await fs.promises.mkdir(tempDir, { recursive: true });
+
+                const newSegPath = path.join(tempDir, `${redrawTaskId}_new.mp4`);
+                await fs.promises.writeFile(newSegPath, newSegBuf);
+
+                const beforePath = path.join(tempDir, `${redrawTaskId}_before.mp4`);
+                const afterPath = path.join(tempDir, `${redrawTaskId}_after.mp4`);
+                const outputPath = path.join(__dirname, `../public/videos/${redrawTaskId}.mp4`);
+
+                const ffmpegPath = getFfmpegPath();
+                const { spawnSync } = await import('child_process');
+
+                const probe = spawnSync(ffmpegPath, ['-i', origVideoPath], { timeout: 10000 });
+                const probeOutput = probe.stderr?.toString() || '';
+                const durMatch = probeOutput.match(/Duration:\s*(\d+):(\d+):(\d+\.\d+)/);
+                const totalDuration = durMatch
+                  ? parseInt(durMatch[1]) * 3600 + parseInt(durMatch[2]) * 60 + parseFloat(durMatch[3])
+                  : endTime + 5;
+
+                const beforeCmd = spawnSync(ffmpegPath, [
+                  '-i', origVideoPath,
+                  '-t', String(startTime),
+                  '-c', 'copy', '-y', beforePath,
+                ], { timeout: 30000 });
+
+                let afterCmd = null;
+                if (endTime < totalDuration) {
+                  afterCmd = spawnSync(ffmpegPath, [
+                    '-i', origVideoPath,
+                    '-ss', String(endTime),
+                    '-c', 'copy', '-y', afterPath,
+                  ], { timeout: 30000 });
+                }
+
+                const parts: string[] = [];
+                if (fs.existsSync(beforePath)) parts.push(beforePath);
+                parts.push(newSegPath);
+                if (afterCmd === null || (afterCmd && fs.existsSync(afterPath))) {
+                  if (afterCmd && fs.existsSync(afterPath)) parts.push(afterPath);
+                }
+
+                const listPath = path.join(tempDir, `${redrawTaskId}_list.txt`);
+                const listContent = parts.map((p) => `file '${p.replace(/\\/g, '/')}'`).join('\n');
+                await fs.promises.writeFile(listPath, listContent);
+
+                const mergeCmd = spawnSync(ffmpegPath, [
+                  '-f', 'concat', '-safe', '0', '-i', listPath,
+                  '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                  '-c:a', 'aac', '-pix_fmt', 'yuv420p',
+                  '-movflags', '+faststart', '-y', outputPath,
+                ], { timeout: 120000 });
+
+                parts.forEach((p) => { try { fs.unlinkSync(p); } catch {} });
+                try { fs.unlinkSync(listPath); } catch {}
+
+                if (mergeCmd.status === 0) {
+                  const finalUrl = `/videos/${redrawTaskId}.mp4`;
+                  addToVideoHistory({
+                    prompt: `${prompt} (区域重绘: ${startTime}s-${endTime}s)`,
+                    style: style || '',
+                    duration: `${segDuration}s (redraw)`,
+                    videoUrl: finalUrl,
+                  });
+                  setTaskProgress(redrawTaskId, {
+                    progress: 100,
+                    status: 'completed',
+                    videoUrl: finalUrl,
+                    taskType: 'redraw',
+                  });
+                } else {
+                  setTaskProgress(redrawTaskId, {
+                    progress: 0,
+                    status: 'failed',
+                    error: `视频拼接失败 (exit code: ${mergeCmd.status})`,
+                    taskType: 'redraw',
+                  });
+                }
+                break;
+              }
+              if (status.status === 'failed') {
+                setTaskProgress(redrawTaskId, { progress: 0, status: 'failed', error: '区域重绘生成失败', taskType: 'redraw' });
+                break;
+              }
+              updateTaskProgress(redrawTaskId, { progress: Math.min(10 + poll * 3, 90) });
+            } catch {}
+          }
+        } else {
+          setTaskProgress(redrawTaskId, { progress: 0, status: 'failed', error: result.error || '引擎启动失败', taskType: 'redraw' });
+        }
+      } catch (e) {
+        setTaskProgress(redrawTaskId, { progress: 0, status: 'failed', error: (e as Error).message, taskType: 'redraw' });
+      }
+    }, 100);
+
+    res.json({
+      success: true,
+      taskId: redrawTaskId,
+      message: `正在重新生成 ${startTime}s-${endTime}s 区间，完成后自动拼接回原视频`,
+    });
+  } catch (error) {
+    console.error('[Video Redraw] Error:', error);
+    res.status(500).json({ success: false, error: (error as Error).message });
+  }
+});
 
 export default router
