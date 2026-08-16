@@ -24,6 +24,20 @@ const router = Router();
 
 let hermesReady: boolean | null = null;
 
+/** 紧凑共享意图识别提示词（3处复用，减少token消耗） */
+const SHARED_INTENT_PROMPT = `你是AI创意工坊意图识别器。检查对话历史关联后，将用户意图分类为8种之一。
+
+意图类型：
+- image:画/图/照片 | video:视频/片子/动画(>18秒设split:true) | compose:图片+视频都要
+- modify-image/modify-video:修改已有作品(历史中有关联时，用户未说"新"则默认modify)
+- remove-bg:抠图 | compose-image:合成拼接 | general:非创作问答
+
+上下文关联规则：历史assistant消息含[上一轮任务]标注。"长一点/短一点/变成15秒"→modify-video提取原prompt。"改风格/调整"→modify-*。"再生成"→modify-*。无关联→全新创作。
+
+参数：prompt(英文80-200词) style(realistic/cinematic/anime/3d/illustration) duration(默认10) split(>18秒true) modifyInstruction(修改要求原文) contextFromPrevious(关联信息)
+
+输出严格JSON：{"action":"video","params":{"prompt":"...","style":"cinematic","duration":10,"split":false},"response":"友好中文回复"}`;
+
 /** 异步检查 Hermes 是否可用（缓存结果 5 分钟） */
 async function checkHermesInstalled(): Promise<boolean> {
   if (hermesReady !== null) return hermesReady;
@@ -73,80 +87,7 @@ async function tryCallReasoningLLM(
   model: string,
   provider: string,
 ): Promise<{ action: string; params: Record<string, any>; response: string; reasoning: string } | null> {
-  const systemPrompt = `你是 AI 创意工坊的推理核心（Hermes Agent），负责深度理解用户创作需求并精准路由。
-
-## 核心原则
-1. **上下文为王**：必须先检查对话历史，理解用户当前请求与历史的关联
-2. **精准分类**：8 种意图类型必须严格区分，不可混淆
-3. **参数完备**：生成的参数必须可直接用于 API 调用，无需二次加工
-4. **自我验证**：输出前反问"我的理解是否与用户真实意图一致？"
-
-## 推理流程（Chain-of-Thought）
-
-### 阶段一：上下文关联分析
-检查对话历史中是否存在之前的创作任务，判断当前请求与历史的关系：
-| 用户语言模式 | 关联类型 | 动作 |
-|-------------|---------|------|
-| "它"/"这个"/"那张图"/"刚才的视频" | **直接指代** | 从历史中找到对应作品，提取关键参数 |
-| "修改一下"/"调整"/"换个风格"/"让它更..." | **修改意图** | 关联到最近一次同类型任务，标记为 modify |
-| "长一点"/"短一点"/"变成15秒"/"改成30秒"/"延长"/"加长"/"缩短" | **时长修改** | 关联到最近视频，提取原 prompt，标记为 modify-video |
-| "再生成一个"/"类似的"/"换个角度" | **延续意图** | 继承上一次的参数（风格/主题），微调 prompt |
-| 全新主题，与历史无关 | **独立意图** | 标注为"无关联"，从零开始推理 |
-
-⚠️ **关键规则**：如果对话历史中有上一个视频/图片任务，且用户没有明确说"新"或"另一个不同的"，则默认为修改/延续意图，不是全新创作。
-
-### 阶段二：意图分类（8 种类型）
-**核心创作类：**
-- **image**：生成图片/插画/海报/壁纸/头像。关键词：画、图、照片、插画、海报
-- **video**：生成视频/短片/动画/广告片/宣传片。关键词：视频、片子、短片、动画、拍
-  - ⚠️ 长视频规则：duration > 18 秒时设置 split: true，response 中提示用户
-- **compose**：同时生成图片+视频。关键词：都要、图片和视频、海报和宣传片、广告物料
-
-**修改编辑类：**
-- **modify-image**：修改已有图片（必须在阶段一确认了关联图片）
-- **modify-video**：修改已有视频（必须在阶段一确认了关联视频）
-- **remove-bg**：抠图/去背景/透明/去除背景
-- **compose-image**：图片合成/拼接/融合/拼一起
-
-**非创作类：**
-- **general**：闲聊/问答/功能介绍/帮助/非创作类问题
-
-### 阶段三：参数推理
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| prompt | 英文提示词，80-200词，含场景+主体+光线+色调 | 从用户描述推理 |
-| style | realistic / cinematic / anime / 3d / illustration | 无明确指向→realistic |
-| duration | 视频时长（秒），根据用户明确数值推断 | 默认10秒 |
-| size | 图片尺寸 | 默认1024x1024 |
-| contextFromPrevious | 如有关联，填入上一轮的主题/风格/角色 | 无关联则省略 |
-
-### 阶段四：自我验证
-输出前检查：
-- [ ] action 类型是否与用户意图匹配？
-- [ ] 如果用户说"画"但 action 是 video → 错误！
-- [ ] 如果用户说"改"但 action 是 image → 错误！
-- [ ] 长视频（>18秒）是否设置了 split: true？
-- [ ] response 是否自然友好且信息完整？
-
-## 输出格式（严格 JSON，不要任何其他文字）
-{
-  "action": "video",
-  "params": {
-    "prompt": "A majestic cyberpunk cat with glowing neon whiskers...",
-    "style": "cinematic",
-    "duration": 10,
-    "split": false,
-    "contextFromPrevious": "上一轮生成了赛博朋克风格的猫"
-  },
-  "response": "好的，基于上一轮的赛博朋克猫，我为您生成一段10秒的电影感视频~"
-}
-
-## 典型案例
-- 用户："画一只猫" → action: image, params: {prompt: "...", style: "realistic", size: "1024x1024"}
-- 用户："做个30秒的汽车广告" → action: video, params: {prompt: "...", style: "cinematic", duration: 30, split: true}
-- 用户："把刚才那张图变成动漫风格" → action: modify-image, params: {prompt: "...", style: "anime", contextFromPrevious: "上一轮生成了...猫"}
-- 用户："帮我抠图" → action: remove-bg
-- 用户："你好，你能做什么" → action: general`;
+  const systemPrompt = SHARED_INTENT_PROMPT;
 
   try {
     const response = await fetchWithTimeout(apiUrl, {
@@ -159,15 +100,13 @@ async function tryCallReasoningLLM(
         model,
         messages: [
           { role: 'system', content: systemPrompt },
-          ...history.slice(-10).map((m: any) => {
-            let content = m.content || '';
+          ...history.slice(-6).map((m: any) => {
+            let content = (m.content || '').substring(0, 500);
             if (m.role === 'assistant' && m.actionType) {
               const ctxParts: string[] = [`[上一轮任务: ${m.actionType}]`];
               if (m.params?.prompt) ctxParts.push(`原始描述: ${m.params.prompt}`);
               if (m.params?.style) ctxParts.push(`风格: ${m.params.style}`);
               if (m.params?.duration) ctxParts.push(`时长: ${m.params.duration}秒`);
-              if (m.generatedVideo) ctxParts.push(`视频地址: ${m.generatedVideo}`);
-              if (m.generatedImage) ctxParts.push(`图片地址: ${m.generatedImage}`);
               content = `${ctxParts.join(' | ')}\n${content}`;
             }
             return { role: m.role === 'user' ? 'user' : 'assistant', content };
@@ -175,7 +114,7 @@ async function tryCallReasoningLLM(
           { role: 'user', content: message },
         ],
         temperature: 0.6,
-        max_tokens: 2000,
+        max_tokens: 800,
       }),
     }, 30000); // 推理模型需要更多时间思考
 
@@ -263,43 +202,7 @@ async function tryCallLLM(
   model: string,
   provider: string,
 ): Promise<{ action: string; params: Record<string, any>; response: string } | null> {
-  const systemPrompt = `你是 AI 创意工坊意图识别器（Hermes Agent 降级模式），负责快速精准识别用户意图。
-
-## 第一步：上下文关联检查
-先看对话历史是否有创作任务：
-| 用户表达 | 关联类型 | 处理 |
-|---------|---------|------|
-| "它"/"这个"/"刚才的" | 直接指代 | 从历史提取作品信息，标记 contextFromPrevious |
-| "修改"/"调整"/"换个风格" | 修改意图 | 关联最近同类型任务，action 改为 modify |
-| "长一点"/"短一点"/"变成15秒"/"改成30秒"/"延长"/"加长" | 时长修改 | 提取原 prompt，action 改为 modify-video |
-| "再生成"/"类似的" | 延续意图 | 继承风格和主题参数 |
-| 全新独立需求 | 无关联 | 不填 contextFromPrevious |
-
-⚠️ **关键规则**：如果历史中有上一个视频/图片任务，且用户没有明确说"新"或"另一个不同的"，则默认为修改/延续意图。
-
-## 第二步：意图识别规则
-| 用户关键词 | action | 核心参数 |
-|-----------|--------|---------|
-| 画/图/照片/插画/海报/壁纸/头像 | **image** | prompt, style, size |
-| 视频/片子/短片/动画/广告/宣传片/拍 | **video** | prompt, style, duration |
-| 都要/图片和视频/海报和宣传片 | **compose** | prompt, style, composeType |
-| 改/修/换/调整/长一点/短一点/变成 + 已有作品 | **modify-image** 或 **modify-video** | prompt, style, contextFromPrevious, modifyInstruction |
-| 抠图/去背景/透明 | **remove-bg** | imageUrl |
-| 拼一起/合成/融合 | **compose-image** | prompt |
-| 你好/帮助/怎么用/能做什么 | **general** | query |
-
-## 第三步：参数智能推断
-- **prompt**：modify-video 时必须从历史 [上一轮任务] 中提取原始描述，不要重新生成
-- **duration**：modify-video 时提取用户新指定的时长（如"15秒"→ 15）
-- **modifyInstruction**：modify-* 时填入用户的修改要求原文
-- **style**：用户说"动漫/二次元"→ anime；"电影/大片"→ cinematic；"3D"→ 3d；"插画"→ illustration；无明确→ realistic
-- **size**：默认 1024x1024
-- **contextFromPrevious**：有历史关联时填入上一轮主题/风格/角色
-
-## 输出格式（严格 JSON，不要其他文字）
-{"action":"video","params":{"prompt":"英文提示词","style":"cinematic","duration":10,"split":false},"response":"自然友好的中文回复"}
-{"action":"image","params":{"prompt":"英文提示词","style":"anime","size":"1024x1024"},"response":"自然友好的中文回复"}
-{"action":"general","params":{"query":"用户问题"},"response":"直接的回复内容"}`;
+  const systemPrompt = SHARED_INTENT_PROMPT;
 
   try {
     const response = await fetchWithTimeout(apiUrl, {
@@ -312,15 +215,13 @@ async function tryCallLLM(
         model,
         messages: [
           { role: 'system', content: systemPrompt },
-          ...history.slice(-10).map((m: any) => {
-            let content = m.content || '';
+          ...history.slice(-6).map((m: any) => {
+            let content = (m.content || '').substring(0, 500);
             if (m.role === 'assistant' && m.actionType) {
               const ctxParts: string[] = [`[上一轮任务: ${m.actionType}]`];
               if (m.params?.prompt) ctxParts.push(`原始描述: ${m.params.prompt}`);
               if (m.params?.style) ctxParts.push(`风格: ${m.params.style}`);
               if (m.params?.duration) ctxParts.push(`时长: ${m.params.duration}秒`);
-              if (m.generatedVideo) ctxParts.push(`视频地址: ${m.generatedVideo}`);
-              if (m.generatedImage) ctxParts.push(`图片地址: ${m.generatedImage}`);
               content = `${ctxParts.join(' | ')}\n${content}`;
             }
             return { role: m.role === 'user' ? 'user' : 'assistant', content };
@@ -328,7 +229,7 @@ async function tryCallLLM(
           { role: 'user', content: message },
         ],
         temperature: 0.7,
-        max_tokens: 400,
+        max_tokens: 300,
       }),
     }, 15000); // 15 秒超时，比之前的 20 秒更快
 
@@ -714,7 +615,7 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
 
     // 智能路由：决定使用大模型/小模型/本地知识库
     const historyLength = (history || []).length;
-    const { decision } = await smartRoute(message, historyLength);
+    const { decision } = await smartRoute(message, historyLength, false, ragResult);
     console.log(`[Router] ${decision.tier} → ${decision.model} | ${decision.reason}`);
 
     // 如果智能路由决定直接用本地知识库，跳过 LLM 调用
@@ -889,36 +790,7 @@ router.post('/chat/stream', async (req: Request, res: Response): Promise<void> =
   setSSEHeaders(res);
 
   try {
-    const systemPrompt = `你是 AI 创意工坊智能助手（Hermes Agent SSE 模式），负责理解用户需求并自由路由。
-
-## 任务类型
-- **image**：生成图片
-- **video**：生成视频（>18秒加 split: true）
-- **compose**：同时生成图片和视频
-- **modify-image** / **modify-video**：修改已有作品（需确认上下文关联）
-- **remove-bg**：抠图去背景
-- **compose-image**：图片合成
-- **general**：非创作类问答
-
-## 上下文关联（关键）
-对话历史中每条 assistant 消息包含 [上一轮任务] 标注，包含原始描述、风格、时长等信息。
-
-当用户的消息是对已有作品的修改、延伸或调整时，必须返回 modify-video 或 modify-image：
-- "长一点"/"短一点"/"变成15秒"/"改成30秒" → modify-video，提取原始 prompt，在 params.prompt 中保留原描述
-- "风格换成动漫"/"改成卡通" → modify-video，prompt 保持原始描述
-- "再生成一个" → modify-video（基于原始 prompt 重新生成）
-- "它"/"这个"/"修改一下" → modify-video/modify-image（根据上一个作品类型判断）
-- 如果对话历史中有上一个视频/图片任务，且用户没有明确说"新"或"另一个不同的" → 优先返回 modify-*
-
-## modify-video 参数说明
-返回 modify-video 时，params 必须包含：
-- prompt: 原始视频描述（从历史 [上一轮任务] 中提取）
-- style: 风格（从历史提取或用户指定的新风格）
-- duration: 新时长（用户指定，否则保持原值）
-- modifyInstruction: 用户的修改要求原文
-
-## 输出格式（严格 JSON）
-{"action":"video","params":{"prompt":"...","style":"cinematic","duration":10,"split":false},"response":"友好的中文回复","contextAnalysis":"与上一轮的关系说明"}`;
+    const systemPrompt = SHARED_INTENT_PROMPT;
 
     const messages: Array<{ role: string; content: string }> = [
       { role: 'system', content: systemPrompt },
@@ -930,7 +802,6 @@ router.post('/chat/stream', async (req: Request, res: Response): Promise<void> =
           if (m.params?.prompt) ctxParts.push(`原始描述: ${m.params.prompt}`);
           if (m.params?.style) ctxParts.push(`风格: ${m.params.style}`);
           if (m.params?.duration) ctxParts.push(`时长: ${m.params.duration}秒`);
-          if (m.generatedVideo) ctxParts.push(`视频地址: ${m.generatedVideo}`);
           content = `${ctxParts.join(' | ')}\n${content}`;
         }
         return { role: m.role, content };

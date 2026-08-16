@@ -864,13 +864,11 @@ export default function AIAssistant() {
         headers: authHeaders(),
         body: JSON.stringify({
           message,
-          history: history.slice(-10).map(m => ({
+          history: history.slice(-6).map(m => ({
             role: m.role,
-            content: m.content,
+            content: (m.content || '').substring(0, 500),
             actionType: m.actionType,
             params: m.params,
-            generatedVideo: m.generatedVideo,
-            generatedImage: m.generatedImage,
           })),
         }),
         signal,
@@ -895,7 +893,12 @@ export default function AIAssistant() {
       const response = await fetch('/api/hermes/chat-with-image', {
         method: 'POST',
         headers: authHeaders(),
-        body: JSON.stringify({ imageUrls, message, history: messages.slice(-10) }),
+        body: JSON.stringify({ imageUrls, message, history: messages.slice(-6).map(m => ({
+          role: m.role,
+          content: (m.content || '').substring(0, 500),
+          actionType: m.actionType,
+          params: m.params,
+        })) }),
         signal,
       });
 
@@ -922,7 +925,7 @@ export default function AIAssistant() {
         body: JSON.stringify({
           message,
           imageUrls: imageUrls && imageUrls.length > 0 ? imageUrls : undefined,
-          history: messages.slice(-10).map(m => ({ role: m.role, content: m.content, actionType: m.actionType, params: m.params, generatedImage: m.generatedImage, generatedVideo: m.generatedVideo, originalPrompt: m.originalPrompt })),
+          history: messages.slice(-6).map(m => ({ role: m.role, content: (m.content || '').substring(0, 500), actionType: m.actionType, params: m.params, originalPrompt: m.originalPrompt })),
         }),
         signal: controller.signal,
       });
@@ -954,7 +957,7 @@ export default function AIAssistant() {
           sessionId,
           originalMessage,
           imageUrls: imageUrls && imageUrls.length > 0 ? imageUrls : undefined,
-          history: messages.slice(-10).map(m => ({ role: m.role, content: m.content, actionType: m.actionType, params: m.params, generatedImage: m.generatedImage, generatedVideo: m.generatedVideo, originalPrompt: m.originalPrompt })),
+          history: messages.slice(-6).map(m => ({ role: m.role, content: (m.content || '').substring(0, 500), actionType: m.actionType, params: m.params, originalPrompt: m.originalPrompt })),
         }),
         signal: controller.signal,
       });
@@ -983,7 +986,7 @@ export default function AIAssistant() {
         body: JSON.stringify({
           message,
           imageUrls: imageUrls && imageUrls.length > 0 ? imageUrls : undefined,
-          history: messages.slice(-10).map(m => ({ role: m.role, content: m.content, actionType: m.actionType, params: m.params, generatedImage: m.generatedImage, generatedVideo: m.generatedVideo, originalPrompt: m.originalPrompt })),
+          history: messages.slice(-6).map(m => ({ role: m.role, content: (m.content || '').substring(0, 500), actionType: m.actionType, params: m.params, originalPrompt: m.originalPrompt })),
         }),
         signal: controller.signal,
       });
@@ -2466,8 +2469,18 @@ export default function AIAssistant() {
         };
       }
 
-      // 🔍 审核 Agent：检查 Agent 的理解是否与用户意图一致
+      // 🔍 审核 Agent：仅在需要时调用（高置信度跳过以节省token）
       let reviewCorrection = '';
+      const actionKeywordMap: Record<string, string[]> = {
+        image: ['画', '图', '照片', '插画', '海报', '壁纸', '头像', 'draw', 'image'],
+        video: ['视频', '片子', '短片', '动画', '广告', '宣传片', 'video'],
+        'remove-bg': ['抠图', '去背景', '透明', 'remove bg'],
+        'compose-image': ['合成', '拼接', '融合', '拼一起'],
+      };
+      const keywords = actionKeywordMap[actionResult.action] || [];
+      const isHighConfidence = keywords.length > 0 && keywords.some(kw => sendText.includes(kw));
+
+      if (!isHighConfidence) {
       try {
         const reviewResponse = await fetch('/api/hermes/review', {
           method: 'POST',
@@ -2498,6 +2511,7 @@ export default function AIAssistant() {
         // 审核失败不阻塞流程
         if ((reviewErr as Error).name === 'AbortError') throw reviewErr;
         console.warn('[Review] Review agent call failed, skipping:', reviewErr);
+      }
       }
 
       const assistantMessage: ChatMessage = {

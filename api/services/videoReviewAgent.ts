@@ -25,27 +25,7 @@ export async function reviewVideoScript(
   script: string,
   duration: string,
 ): Promise<VideoReviewResult> {
-  // 优先使用推理模型
-  const reasoningResult = await reviewWithReasoningModel(
-    `你是视频脚本审核员（Video Review Agent），拥有丰富的影视制作经验。请逐步推理分析脚本质量。
-
-## 推理步骤
-1. **相关性分析**：脚本是否紧扣用户需求？有无偏离主题？
-2. **可生成性分析**：脚本描述是否足够视觉化？能否转化为视频画面？
-3. **完整度分析**：是否包含场景、角色、动作、运镜、光线/色调五大要素？
-4. **时长匹配**：场景总时长是否匹配 ${duration} 秒？
-5. **安全性分析**：是否包含暴力、色情、政治敏感内容？
-
-## 输出JSON
-{"passed":true,"level":"ok","message":"脚本质量良好，五大要素齐全","suggestions":[]}
-{"passed":false,"level":"warning","message":"脚本缺少光线描述","suggestions":["补充 golden hour 或 soft lighting 等光线描述"]}
-{"passed":false,"level":"error","message":"脚本包含不适宜内容","suggestions":["移除...","替换为..."]}`,
-    `用户需求: ${userPrompt}\n\n脚本内容: ${script.substring(0, 1000)}`,
-    '脚本审核',
-  );
-  if (reasoningResult) return reasoningResult;
-
-  // 降级到指令模型
+  // 直接使用指令模型（跳过推理模型以节省token）
   const apiKey = process.env.ZHIPU_API_KEY;
   if (!apiKey) {
     return { passed: true, level: 'ok', message: '无审核Key，跳过', suggestions: [], checkedAt: '脚本审核' };
@@ -131,25 +111,7 @@ export async function reviewVideoParams(
   userPrompt: string,
   params: Record<string, any>,
 ): Promise<VideoReviewResult> {
-  // 优先使用推理模型
-  const reasoningResult = await reviewWithReasoningModel(
-    `你是视频参数审核员（Video Review Agent）。请逐步推理分析参数质量：
-
-## 推理步骤
-1. **prompt 质量**：是否英文？是否包含视觉四要素（场景+主体+光线+运镜）？长度是否50-300词？
-2. **style 匹配**：风格是否匹配用户描述？（用户说"电影大片"但 style=illustration → 错误）
-3. **duration 合理**：时长是否在 API 支持范围（5-90秒）？是否匹配用户要求？
-4. **参数完整**：prompt, style, duration 三个必须都有，缺一不可
-
-## 输出JSON
-{"passed":true,"level":"ok","message":"参数配置正确，prompt质量高，风格匹配"}
-{"passed":false,"level":"warning","message":"prompt 过短(仅20词)，缺少视觉细节","suggestions":["补充场景描述、光线和运镜信息，扩展到80-200词"]}`,
-    `用户需求: ${userPrompt}\n\n生成参数: ${JSON.stringify(params)}`,
-    '参数审核',
-  );
-  if (reasoningResult) return reasoningResult;
-
-  // 降级到指令模型
+  // 直接使用指令模型（跳过推理模型以节省token）
   const apiKey = process.env.ZHIPU_API_KEY;
   if (!apiKey) {
     return { passed: true, level: 'ok', message: '无审核Key', suggestions: [], checkedAt: '参数审核' };

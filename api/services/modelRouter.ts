@@ -117,11 +117,12 @@ export function routeModel(
 export async function smartRoute(
   message: string,
   historyLength: number = 0,
-  hasImages: boolean = false
+  hasImages: boolean = false,
+  precomputedRag?: any
 ): Promise<{ decision: RoutingDecision; localResult?: any }> {
   // 先尝试本地知识库
   try {
-    const ragResult = await semanticRAG(message);
+    const ragResult = precomputedRag || await semanticRAG(message);
     if (ragResult.source === 'llm' && ragResult.template) {
       // LLM 检索命中了高质量模板，可直接使用
       return {
