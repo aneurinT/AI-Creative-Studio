@@ -89,8 +89,11 @@ async function tryCallReasoningLLM(
 |-------------|---------|------|
 | "它"/"这个"/"那张图"/"刚才的视频" | **直接指代** | 从历史中找到对应作品，提取关键参数 |
 | "修改一下"/"调整"/"换个风格"/"让它更..." | **修改意图** | 关联到最近一次同类型任务，标记为 modify |
+| "长一点"/"短一点"/"变成15秒"/"改成30秒"/"延长"/"加长"/"缩短" | **时长修改** | 关联到最近视频，提取原 prompt，标记为 modify-video |
 | "再生成一个"/"类似的"/"换个角度" | **延续意图** | 继承上一次的参数（风格/主题），微调 prompt |
 | 全新主题，与历史无关 | **独立意图** | 标注为"无关联"，从零开始推理 |
+
+⚠️ **关键规则**：如果对话历史中有上一个视频/图片任务，且用户没有明确说"新"或"另一个不同的"，则默认为修改/延续意图，不是全新创作。
 
 ### 阶段二：意图分类（8 种类型）
 **核心创作类：**
@@ -156,12 +159,19 @@ async function tryCallReasoningLLM(
         model,
         messages: [
           { role: 'system', content: systemPrompt },
-          ...history.slice(-10).map((m: any) => ({
-            role: m.role === 'user' ? 'user' : 'assistant',
-            content: m.role === 'assistant' && m.actionType
-              ? `${m.content} [任务类型: ${m.actionType}, 参数: ${JSON.stringify(m.params || {}).substring(0, 200)}]`
-              : m.content,
-          })),
+          ...history.slice(-10).map((m: any) => {
+            let content = m.content || '';
+            if (m.role === 'assistant' && m.actionType) {
+              const ctxParts: string[] = [`[上一轮任务: ${m.actionType}]`];
+              if (m.params?.prompt) ctxParts.push(`原始描述: ${m.params.prompt}`);
+              if (m.params?.style) ctxParts.push(`风格: ${m.params.style}`);
+              if (m.params?.duration) ctxParts.push(`时长: ${m.params.duration}秒`);
+              if (m.generatedVideo) ctxParts.push(`视频地址: ${m.generatedVideo}`);
+              if (m.generatedImage) ctxParts.push(`图片地址: ${m.generatedImage}`);
+              content = `${ctxParts.join(' | ')}\n${content}`;
+            }
+            return { role: m.role === 'user' ? 'user' : 'assistant', content };
+          }),
           { role: 'user', content: message },
         ],
         temperature: 0.6,
@@ -261,8 +271,11 @@ async function tryCallLLM(
 |---------|---------|------|
 | "它"/"这个"/"刚才的" | 直接指代 | 从历史提取作品信息，标记 contextFromPrevious |
 | "修改"/"调整"/"换个风格" | 修改意图 | 关联最近同类型任务，action 改为 modify |
+| "长一点"/"短一点"/"变成15秒"/"改成30秒"/"延长"/"加长" | 时长修改 | 提取原 prompt，action 改为 modify-video |
 | "再生成"/"类似的" | 延续意图 | 继承风格和主题参数 |
 | 全新独立需求 | 无关联 | 不填 contextFromPrevious |
+
+⚠️ **关键规则**：如果历史中有上一个视频/图片任务，且用户没有明确说"新"或"另一个不同的"，则默认为修改/延续意图。
 
 ## 第二步：意图识别规则
 | 用户关键词 | action | 核心参数 |
@@ -270,15 +283,16 @@ async function tryCallLLM(
 | 画/图/照片/插画/海报/壁纸/头像 | **image** | prompt, style, size |
 | 视频/片子/短片/动画/广告/宣传片/拍 | **video** | prompt, style, duration |
 | 都要/图片和视频/海报和宣传片 | **compose** | prompt, style, composeType |
-| 改/修/换/调整 + 已有作品 | **modify-image** 或 **modify-video** | prompt, style, contextFromPrevious |
+| 改/修/换/调整/长一点/短一点/变成 + 已有作品 | **modify-image** 或 **modify-video** | prompt, style, contextFromPrevious, modifyInstruction |
 | 抠图/去背景/透明 | **remove-bg** | imageUrl |
 | 拼一起/合成/融合 | **compose-image** | prompt |
 | 你好/帮助/怎么用/能做什么 | **general** | query |
 
 ## 第三步：参数智能推断
-- **prompt**：英文，描述要含场景+主体+光线+色调，80-200词
+- **prompt**：modify-video 时必须从历史 [上一轮任务] 中提取原始描述，不要重新生成
+- **duration**：modify-video 时提取用户新指定的时长（如"15秒"→ 15）
+- **modifyInstruction**：modify-* 时填入用户的修改要求原文
 - **style**：用户说"动漫/二次元"→ anime；"电影/大片"→ cinematic；"3D"→ 3d；"插画"→ illustration；无明确→ realistic
-- **duration**：用户说"30秒"→ 30；"1分钟"→ 60；没说→ 默认10；>18秒→ 加 split: true
 - **size**：默认 1024x1024
 - **contextFromPrevious**：有历史关联时填入上一轮主题/风格/角色
 
@@ -298,12 +312,19 @@ async function tryCallLLM(
         model,
         messages: [
           { role: 'system', content: systemPrompt },
-          ...history.slice(-10).map((m: any) => ({
-            role: m.role === 'user' ? 'user' : 'assistant',
-            content: m.role === 'assistant' && m.actionType
-              ? `${m.content} [任务类型: ${m.actionType}, 参数: ${JSON.stringify(m.params || {}).substring(0, 200)}]`
-              : m.content,
-          })),
+          ...history.slice(-10).map((m: any) => {
+            let content = m.content || '';
+            if (m.role === 'assistant' && m.actionType) {
+              const ctxParts: string[] = [`[上一轮任务: ${m.actionType}]`];
+              if (m.params?.prompt) ctxParts.push(`原始描述: ${m.params.prompt}`);
+              if (m.params?.style) ctxParts.push(`风格: ${m.params.style}`);
+              if (m.params?.duration) ctxParts.push(`时长: ${m.params.duration}秒`);
+              if (m.generatedVideo) ctxParts.push(`视频地址: ${m.generatedVideo}`);
+              if (m.generatedImage) ctxParts.push(`图片地址: ${m.generatedImage}`);
+              content = `${ctxParts.join(' | ')}\n${content}`;
+            }
+            return { role: m.role === 'user' ? 'user' : 'assistant', content };
+          }),
           { role: 'user', content: message },
         ],
         temperature: 0.7,
@@ -493,17 +514,24 @@ function parseHermesAction(output: string, originalMessage: string): { action: s
 function fallbackAnalyze(message: string): { action: string; params: Record<string, any> } {
   const lowerText = message.toLowerCase();
 
-  if (lowerText.includes('修改') || lowerText.includes('更改') || lowerText.includes('换成') || lowerText.includes('改成')) {
-    let modifyType = 'background';
+  const modifyKeywords = ['修改', '更改', '换成', '改成', '长一点', '短一点', '加长', '缩短', '延长',
+    '变成', '变长', '再生成', '重新生成', '换个风格', '换风格', '调整'];
+  if (modifyKeywords.some(kw => lowerText.includes(kw))) {
+    let modifyType = 'general';
     if (lowerText.includes('背景')) modifyType = 'background';
     else if (lowerText.includes('人物') || lowerText.includes('角色') || lowerText.includes('着装') || lowerText.includes('性别')) modifyType = 'character';
     else if (lowerText.includes('音乐') || lowerText.includes('bgm') || lowerText.includes('音效')) modifyType = 'music';
     else if (lowerText.includes('剧情') || lowerText.includes('故事') || lowerText.includes('情节')) modifyType = 'story';
     else if (lowerText.includes('风格')) modifyType = 'style';
+    else if (lowerText.includes('长') || lowerText.includes('短') || lowerText.includes('秒')) modifyType = 'duration';
+    else if (lowerText.includes('再生成') || lowerText.includes('重新')) modifyType = 'regenerate';
+
+    const durationMatch = lowerText.match(/(\d+)\s*秒|(\d+)\s*s\b/);
+    const duration = durationMatch ? parseInt(durationMatch[1] || durationMatch[2]) : undefined;
 
     return {
       action: 'modify-video',
-      params: { modifyType, description: message },
+      params: { modifyType, description: message, ...(duration && { duration }) },
     };
   }
 
@@ -870,15 +898,41 @@ router.post('/chat/stream', async (req: Request, res: Response): Promise<void> =
 - **compose-image**：图片合成
 - **general**：非创作类问答
 
-## 上下文关联
-如果用户说"它"/"这个"/"修改一下"/"再生成一个"，必须从对话历史中找到关联的上一个作品信息。
+## 上下文关联（关键）
+对话历史中每条 assistant 消息包含 [上一轮任务] 标注，包含原始描述、风格、时长等信息。
+
+当用户的消息是对已有作品的修改、延伸或调整时，必须返回 modify-video 或 modify-image：
+- "长一点"/"短一点"/"变成15秒"/"改成30秒" → modify-video，提取原始 prompt，在 params.prompt 中保留原描述
+- "风格换成动漫"/"改成卡通" → modify-video，prompt 保持原始描述
+- "再生成一个" → modify-video（基于原始 prompt 重新生成）
+- "它"/"这个"/"修改一下" → modify-video/modify-image（根据上一个作品类型判断）
+- 如果对话历史中有上一个视频/图片任务，且用户没有明确说"新"或"另一个不同的" → 优先返回 modify-*
+
+## modify-video 参数说明
+返回 modify-video 时，params 必须包含：
+- prompt: 原始视频描述（从历史 [上一轮任务] 中提取）
+- style: 风格（从历史提取或用户指定的新风格）
+- duration: 新时长（用户指定，否则保持原值）
+- modifyInstruction: 用户的修改要求原文
 
 ## 输出格式（严格 JSON）
 {"action":"video","params":{"prompt":"...","style":"cinematic","duration":10,"split":false},"response":"友好的中文回复","contextAnalysis":"与上一轮的关系说明"}`;
 
     const messages: Array<{ role: string; content: string }> = [
       { role: 'system', content: systemPrompt },
-      ...(history || []).slice(-5).map((m: any) => ({ role: m.role, content: (m.content || '').substring(0, 500) })),
+      ...(history || []).slice(-6).map((m: any) => {
+        let content = (m.content || '').substring(0, 500);
+        if (m.role === 'assistant' && m.actionType) {
+          const ctxParts: string[] = [];
+          ctxParts.push(`[上一轮任务: ${m.actionType}]`);
+          if (m.params?.prompt) ctxParts.push(`原始描述: ${m.params.prompt}`);
+          if (m.params?.style) ctxParts.push(`风格: ${m.params.style}`);
+          if (m.params?.duration) ctxParts.push(`时长: ${m.params.duration}秒`);
+          if (m.generatedVideo) ctxParts.push(`视频地址: ${m.generatedVideo}`);
+          content = `${ctxParts.join(' | ')}\n${content}`;
+        }
+        return { role: m.role, content };
+      }),
       { role: 'user', content: message },
     ];
 

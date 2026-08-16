@@ -220,9 +220,12 @@ export default function AIAssistant() {
       if (m.content && (
         m.content.includes('✅') ||
         m.content.includes('❌') ||
+        m.content.includes('完成') ||
         m.content.includes('审核 Agent 已确认') ||
         m.content.includes('视频生成失败') ||
-        m.content.includes('图片生成失败')
+        m.content.includes('图片生成失败') ||
+        m.content.includes('正在提交视频生成') ||
+        m.content.includes('正在为你生成图片')
       )) return false
       // 僵尸任务保护：超过 30 分钟仍 isGenerating 的任务不再显示
       if (m.timestamp && (now - m.timestamp) > ZOMBIE_TIMEOUT_MS) return false
@@ -238,9 +241,12 @@ export default function AIAssistant() {
       return m.generatedVideo || m.generatedImage || (m.content && (
         m.content.includes('✅') ||
         m.content.includes('❌') ||
+        m.content.includes('完成') ||
         m.content.includes('审核 Agent 已确认') ||
         m.content.includes('视频生成失败') ||
-        m.content.includes('图片生成失败')
+        m.content.includes('图片生成失败') ||
+        m.content.includes('正在提交视频生成') ||
+        m.content.includes('正在为你生成图片')
       ))
     })
 
@@ -652,18 +658,29 @@ export default function AIAssistant() {
   function recognizeAction(text: string): { action: string; params: Record<string, any> } {
     const lowerText = text.toLowerCase();
 
-    if (lowerText.includes('修改') || lowerText.includes('更改') || lowerText.includes('换成') || lowerText.includes('改成')) {
-      let modifyType = 'background';
+    const modifyKeywords = ['修改', '更改', '换成', '改成', '长一点', '短一点', '加长', '缩短', '延长',
+      '变成', '变长', '再生成', '重新生成', '换个风格', '换风格', '调整'];
+    const isModifyIntent = modifyKeywords.some(kw => lowerText.includes(kw));
+
+    const hasVideoContext = !!videoContext?.videoUrl;
+    const hasImageContext = !!imageContext?.imageUrl;
+    const hasNewCreationKeyword = lowerText.includes('新') && (lowerText.includes('视频') || lowerText.includes('图') || lowerText.includes('画'));
+
+    if (isModifyIntent || (hasVideoContext && !hasNewCreationKeyword)) {
+      let modifyType = 'general';
       if (lowerText.includes('背景')) modifyType = 'background';
       else if (lowerText.includes('人物') || lowerText.includes('角色') || lowerText.includes('着装') || lowerText.includes('性别')) modifyType = 'character';
       else if (lowerText.includes('音乐') || lowerText.includes('bgm') || lowerText.includes('音效')) modifyType = 'music';
       else if (lowerText.includes('剧情') || lowerText.includes('故事') || lowerText.includes('情节')) modifyType = 'story';
       else if (lowerText.includes('风格')) modifyType = 'style';
+      else if (lowerText.includes('长') || lowerText.includes('短') || lowerText.includes('秒')) modifyType = 'duration';
+      else if (lowerText.includes('再生成') || lowerText.includes('重新')) modifyType = 'regenerate';
 
       const hasVideoKeyword = lowerText.includes('视频') || lowerText.includes('video');
       const hasImageKeyword = lowerText.includes('图片') || lowerText.includes('image') || lowerText.includes('图');
 
-      if (hasVideoKeyword || (!hasImageKeyword && videoContext)) {
+      if (hasVideoKeyword || (hasVideoContext && !hasImageKeyword)) {
+        const newDuration = extractDuration(text) || videoContext?.duration || '10';
         return {
           action: 'modify-video',
           params: {
@@ -671,10 +688,10 @@ export default function AIAssistant() {
             description: text,
             currentPrompt: videoContext?.prompt || '',
             currentStyle: videoContext?.style || '',
-            currentDuration: videoContext?.duration || '',
+            currentDuration: newDuration,
           },
         };
-      } else {
+      } else if (hasImageContext) {
         return {
           action: 'modify-image',
           params: {
@@ -850,6 +867,10 @@ export default function AIAssistant() {
           history: history.slice(-10).map(m => ({
             role: m.role,
             content: m.content,
+            actionType: m.actionType,
+            params: m.params,
+            generatedVideo: m.generatedVideo,
+            generatedImage: m.generatedImage,
           })),
         }),
         signal,
@@ -995,6 +1016,7 @@ export default function AIAssistant() {
       isGenerating: true,
       progress: 0,
       timestamp: Date.now(),
+      params: { prompt: params.prompt, style: params.style || 'realistic' },
     }]);
 
     const MAX_RETRIES = 3;
@@ -1037,7 +1059,11 @@ export default function AIAssistant() {
                 generatedImage: data.imageUrl,
                 originalPrompt: params.prompt,
                 modifyHistory: [],
+                params: { prompt: params.prompt, style: params.style || 'realistic' },
               };
+            }
+            if (m.isGenerating && m.id !== loadingId) {
+              return { ...m, isGenerating: false };
             }
             return m;
           }));
@@ -1286,11 +1312,15 @@ export default function AIAssistant() {
               isGenerating: false,
               generatedVideo: data.videoUrl,
               originalPrompt: `${originalPrompt} | 修改：${modifyInstruction}`,
+              params: { prompt: originalPrompt, style, duration },
               modifyHistory: [
                 ...(m.modifyHistory || []),
                 { prompt: modifyInstruction, result: data.videoUrl, timestamp: Date.now() }
               ],
             };
+          }
+          if (m.isGenerating && m.id !== loadingId) {
+            return { ...m, isGenerating: false };
           }
           return m;
         }));
@@ -1516,6 +1546,7 @@ export default function AIAssistant() {
       timestamp: Date.now(),
       agentThoughts,
       sessionId,
+      params: { prompt: params.prompt, style: params.style || 'realistic', duration: params.duration || '10' },
     }]);
 
     // 实时展示生成进度阶段
@@ -1779,7 +1810,12 @@ export default function AIAssistant() {
                   generatedVideo: finalVideoUrl,
                   originalPrompt: params.prompt,
                   modifyHistory: [],
+                  params: { prompt: params.prompt, style: params.style || 'realistic', duration: params.duration || '10' },
                 };
+              }
+              // 清理所有其他残留的 isGenerating 消息（脚本创作、分析等中间步骤）
+              if (m.isGenerating && m.id !== loadingId) {
+                return { ...m, isGenerating: false };
               }
               return m;
             }));
@@ -1830,6 +1866,9 @@ export default function AIAssistant() {
                 if (m.id === loadingId) {
                   return { ...m, content: errorTip, isGenerating: false };
                 }
+                if (m.isGenerating) {
+                  return { ...m, isGenerating: false };
+                }
                 return m;
               }));
               return;
@@ -1879,6 +1918,9 @@ export default function AIAssistant() {
                     content: `❌ 视频生成失败: ${errorMsg}${analysis}`,
                     isGenerating: false,
                   };
+                }
+                if (m.isGenerating) {
+                  return { ...m, isGenerating: false };
                 }
                 return m;
               }));
@@ -2405,8 +2447,23 @@ export default function AIAssistant() {
       let actionResult = recognizeAction(sendText);
 
       if (hermesResult.action) {
-        actionResult.action = hermesResult.action;
-        actionResult.params = { ...actionResult.params, ...hermesResult.params };
+        // recognizeAction 的 modify-* 优先级更高（它有 videoContext/imageContext 状态）
+        // 只有当 LLM 也返回 modify-* 或 recognizeAction 未识别为 modify-* 时才覆盖
+        const isLocalModify = actionResult.action.startsWith('modify-');
+        const isLLMModify = hermesResult.action.startsWith('modify-');
+        if (!isLocalModify || isLLMModify) {
+          actionResult.action = hermesResult.action;
+        }
+        // 合并参数：LLM 的 prompt/duration 优先，但保留 recognizeAction 的 current* 参数
+        actionResult.params = {
+          ...actionResult.params,
+          ...hermesResult.params,
+          ...(isLocalModify ? {
+            currentPrompt: actionResult.params.currentPrompt,
+            currentStyle: actionResult.params.currentStyle,
+            currentDuration: actionResult.params.currentDuration,
+          } : {}),
+        };
       }
 
       // 🔍 审核 Agent：检查 Agent 的理解是否与用户意图一致
@@ -2672,9 +2729,11 @@ export default function AIAssistant() {
 
           if (lastVideoMessage) {
             // 有已生成视频，走修改接口
-            const originPrompt = lastVideoMessage.originalPrompt || currentPrompt || '';
-            const originStyle = lastVideoMessage.params?.style || currentStyle || 'realistic';
-            const originDuration = lastVideoMessage.params?.duration || currentDuration || '10';
+            const originPrompt = actionResult.params?.prompt || lastVideoMessage.originalPrompt || currentPrompt || '';
+            const originStyle = actionResult.params?.style || lastVideoMessage.params?.style || currentStyle || 'realistic';
+            // 时长优先级：用户本次指定 > 原视频时长 > 默认
+            const userDuration = extractDuration(description || '') || currentDuration;
+            const originDuration = userDuration || lastVideoMessage.params?.duration || '10';
             await modifyVideoAction(
               lastVideoMessage.id,
               originPrompt,
