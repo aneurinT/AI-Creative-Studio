@@ -152,14 +152,14 @@ function getApiKey(model: string): string | undefined {
     return config.models?.['wanx-video']?.apiKey || process.env.DASHSCOPE_API_KEY;
   }
   if (model === 'seedance') {
-    return config.models?.seedance?.apiKey || process.env.SEEDANCE_API_KEY;
+    return config.models?.['seedance']?.apiKey || process.env.SEEDANCE_API_KEY;
   }
   if (model === 'agnes') {
-    return config.models?.agnes?.apiKey || process.env.AGNES_VIDEO_API_KEY;
+    return config.models?.['agnes']?.apiKey || process.env.AGNES_VIDEO_API_KEY;
   }
   // LLM 模型
   if (model === 'deepseek') {
-    return config.models?.deepseek?.apiKey || process.env.DEEPSEEK_API_KEY;
+    return config.models?.['deepseek']?.apiKey || process.env.DEEPSEEK_API_KEY;
   }
   if (model === 'zhipu') {
     return config.models?.['cogvideox-flash']?.apiKey || process.env.ZHIPU_API_KEY;
@@ -806,9 +806,10 @@ export async function analyzeImageWithText(request: {
     console.warn(`[analyzeImageWithText] 图片 base64 较大(${(imageBase64.length / 1024 / 1024).toFixed(1)}MB)，可能影响识别速度`);
   }
 
+  const controller = new AbortController();
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 120000);
+    timeoutId = setTimeout(() => controller.abort(), 120000);
 
     const response = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
       method: 'POST',
@@ -909,7 +910,7 @@ export async function analyzeImageWithText(request: {
       },
     };
   } catch (error) {
-    clearTimeout(timeoutId);
+    if (timeoutId) clearTimeout(timeoutId);
     console.error(`[analyzeImageWithText] Error:`, error);
     return { success: false, error: (error as Error).message };
   }

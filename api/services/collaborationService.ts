@@ -159,7 +159,7 @@ export function broadcastMessage(msg: Omit<CollaborationMessage, 'id' | 'timesta
       is_generating: 0, progress: 0,
       agent_thoughts: '[]', agent_process: '{}', modify_history: '[]',
       timestamp: fullMsg.timestamp,
-    }).catch(() => {});
+    });
   }
 
   return fullMsg;

@@ -1027,7 +1027,7 @@ export default function AIAssistant() {
         const apiUrl = '/api/generate';
         const response = await fetch(apiUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: authHeaders(),
           body: JSON.stringify({
             prompt: params.prompt,
             style: params.style || 'realistic',
@@ -1363,7 +1363,7 @@ export default function AIAssistant() {
   }
 
   /** 视频编辑 Agent 操作（字幕/配音/裁剪/替换片段） */
-  async function videoEditAction(instruction: string, messages: Message[]) {
+  async function videoEditAction(instruction: string, messages: ChatMessage[]) {
     const loadingId = `edit-loading-${Date.now()}`;
     const controller = new AbortController();
     activeTasksRef.current.set(loadingId, controller);
@@ -1385,7 +1385,7 @@ export default function AIAssistant() {
 
       const requestBody: any = {
         message: instruction,
-        sessionId: sessionId,
+        sessionId: currentSession?.id,
         history: messages.slice(-10).map(m => ({
           role: m.role,
           content: m.content,

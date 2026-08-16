@@ -395,7 +395,6 @@ export async function generateSplitVideo(
     const result = await generateVideo({
       prompt: validatedPrompt,
       style,
-      style,
       duration: mappedDuration as '5' | '10' | '15' | '18' | '30' | '36',
     });
     if (result.success && result.videoUrl) {
@@ -558,11 +557,11 @@ export async function generateSplitVideo(
     );
 
     if (reviewResult.passed) {
-      console.log(`[SplitVideo] Review passed: ${reviewResult.reason}`);
-      onProgress?.(98, `✅ 审核通过: ${reviewResult.reason || '质量合格'}`);
+      console.log(`[SplitVideo] Review passed: ${reviewResult.message}`);
+      onProgress?.(98, `✅ 审核通过: ${reviewResult.message || '质量合格'}`);
     } else {
-      console.warn(`[SplitVideo] Review warning: ${reviewResult.reason} (score: ${reviewResult.score})`);
-      onProgress?.(98, `⚠️ 审核提示: ${reviewResult.reason || '部分片段可能不完美'}`);
+      console.warn(`[SplitVideo] Review warning: ${reviewResult.message}`);
+      onProgress?.(98, `⚠️ 审核提示: ${reviewResult.message || '部分片段可能不完美'}`);
     }
     
     addToVideoHistory({
@@ -578,11 +577,10 @@ export async function generateSplitVideo(
     onProgress?.(100, doneMsg);
     console.log(`[SplitVideo] Complete: ${finalUrl} (${tempSegmentPaths.length}/${scenes.length} segments, review: ${reviewResult.passed ? 'passed' : 'warning'})`);
 
-    return { 
-      success: true, 
-      videoUrl: finalUrl, 
+    return {
+      success: true,
+      videoUrl: finalUrl,
       progress: 100,
-      reviewScore: reviewResult.score,
       reviewPassed: reviewResult.passed,
     };
 

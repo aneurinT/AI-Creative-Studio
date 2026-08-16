@@ -64,7 +64,7 @@ export function clearSessionShortMemories(sessionId: string): void {
 }
 
 // ===== 长期记忆 =====
-export function addLongMemory(m: Omit<import('./db/types.js').LongMemoryRow, 'access_count' | 'last_accessed'>): string {
+export function addLongMemory(m: Omit<import('./db/types.js').LongMemoryRow, 'id' | 'created_at' | 'access_count' | 'last_accessed'>): string {
   return getDb().addLongMemory(m);
 }
 export function getLongMemoriesByAgent(agentName: string, limit = 50) {

@@ -231,7 +231,7 @@ export interface DatabaseAdapter {
   clearSessionShortMemories(sessionId: string): void;
 
   // 长期记忆
-  addLongMemory(m: Omit<LongMemoryRow, 'access_count' | 'last_accessed'>): string;
+  addLongMemory(m: Omit<LongMemoryRow, 'id' | 'created_at' | 'access_count' | 'last_accessed'>): string;
   getLongMemoriesByAgent(agentName: string, limit?: number): LongMemoryRow[];
   searchLongMemories(query: string, limit?: number): LongMemoryRow[];
   getAllLongMemoriesWithEmbedding(limit?: number): LongMemoryRow[];

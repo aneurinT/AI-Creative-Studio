@@ -6,7 +6,8 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fetch from 'node-fetch';
-import { hybridSearch, vectorSearch, keywordSearch, addDocuments, getAllDocuments, isEmbeddingReady } from './vectorStore.js';
+import { hybridSearch, vectorSearch, keywordSearch, addDocuments, getAllDocuments } from './vectorStore.js';
+import { isEmbeddingReady } from './embeddingService.js';
 import { fetchWithTimeout } from './fetchUtils.js';
 
 const __filename = fileURLToPath(import.meta.url);

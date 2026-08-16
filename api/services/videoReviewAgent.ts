@@ -234,7 +234,7 @@ export function quickScoreVideoPrompt(prompt: string, style: string, duration: s
   if (d > 18) { score -= 15; issues.push('时长超过18秒需拆分，成功率降低'); }
   if (prompt && prompt.length > 500) { score += 5; }
   if (prompt && /camera|light|angle|cinematic|slow|pan|zoom|close.?up|wide/i.test(prompt)) { score += 10; }
-  if (!prompt || prompt.length > 50 && /[a-z]/i.test(prompt)) { score += 5; } // 英文prompt加分
+  if (prompt && prompt.length > 50 && /[a-z]/i.test(prompt)) { score += 5; } // 英文prompt加分
 
   return { score: Math.max(0, Math.min(100, score)), issues };
 }

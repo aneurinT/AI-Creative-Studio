@@ -206,12 +206,12 @@ async function tryCallReasoningLLM(
       return null;
     }
 
-    const parsed = JSON.parse(jsonMatch[0]);
+    let parsed: any;
+    try { parsed = JSON.parse(jsonMatch[0]); } catch { return null; }
     const action = (parsed.action || '').toLowerCase();
-    const validActions = ['image', 'video', 'modify-image', 'modify-video', 'remove-bg', 'compose', 'compose-image', 'general'];
-    const mappedAction = validActions.find(a => action.includes(a)) || 'general';
+    const validActions = ['modify-image', 'modify-video', 'compose-image', 'remove-bg', 'compose', 'image', 'video', 'general'];
+    const mappedAction = validActions.find(a => action === a || action.startsWith(a)) || 'general';
     const params = parsed.params || {};
-    // 基于推理结果自动生成有实质内容的分析总结
     const analysisSummary = buildAnalysisSummary(mappedAction, params, reasoning);
 
     console.log(`[${provider}] Intent: ${mappedAction} | Summary: ${analysisSummary.substring(0, 80)}`);
@@ -344,10 +344,11 @@ async function tryCallLLM(
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;
 
-    const parsed = JSON.parse(jsonMatch[0]);
+    let parsed: any;
+    try { parsed = JSON.parse(jsonMatch[0]); } catch { return null; }
     const action = (parsed.action || '').toLowerCase();
-    const validActions = ['image', 'video', 'modify-image', 'modify-video', 'remove-bg', 'compose', 'compose-image', 'general'];
-    const mappedAction = validActions.find(a => action.includes(a)) || 'general';
+    const validActions = ['modify-image', 'modify-video', 'compose-image', 'remove-bg', 'compose', 'image', 'video', 'general'];
+    const mappedAction = validActions.find(a => action === a || action.startsWith(a)) || 'general';
     const params = parsed.params || {};
     console.log(`[${provider}] Intent: ${mappedAction} | ${parsed.response?.substring(0, 50)}`);
 
@@ -457,8 +458,8 @@ function parseHermesAction(output: string, originalMessage: string): { action: s
       const parsed = JSON.parse(jsonMatch[0]);
       if (parsed.action || parsed.Action || parsed.intent) {
         const action = (parsed.action || parsed.Action || parsed.intent || '').toLowerCase();
-        const validActions = ['image', 'video', 'modify-image', 'modify-video', 'remove-bg', 'compose', 'general'];
-        const mappedAction = validActions.find(a => action.includes(a)) || fallback.action;
+        const validActions = ['modify-image', 'modify-video', 'remove-bg', 'compose', 'image', 'video', 'general'];
+        const mappedAction = validActions.find(a => action === a || action.startsWith(a)) || fallback.action;
 
         const params: Record<string, any> = {};
         const value = parsed.params || parsed.Parameters || parsed;
@@ -490,8 +491,8 @@ function parseHermesAction(output: string, originalMessage: string): { action: s
 
   if (kvMap.action || kvMap.intent) {
     const action = (kvMap.action || kvMap.intent || '').toLowerCase();
-    const validActions = ['image', 'video', 'modify-image', 'modify-video', 'remove-bg', 'compose', 'general'];
-    const mappedAction = validActions.find(a => action.includes(a)) || fallback.action;
+    const validActions = ['modify-image', 'modify-video', 'remove-bg', 'compose', 'image', 'video', 'general'];
+    const mappedAction = validActions.find(a => action === a || action.startsWith(a)) || fallback.action;
     const params: Record<string, any> = {};
     params.prompt = kvMap.prompt || kvMap.description || originalMessage;
     if (kvMap.style) params.style = kvMap.style;
@@ -580,7 +581,7 @@ function isGeneralQuery(message: string): boolean {
     '告诉', '介绍', '说明', '区别', '定义', '含义',
     '翻译', '计算', '算一下', '等于',
     '你好', '你是谁', '能做什么', '帮助', 'help',
-    '新闻', '热点', '事件', '历史',
+    '新闻', '热点', '事件',
   ];
 
   // 疑问句式判断
@@ -734,9 +735,10 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
 
     let reasoningResult: any = null;
     // 只有调度 Agent 决定需要深度推理时才用推理模型
+    const contextualMessage = memoryContext ? `${message}\n\n${memoryContext}` : message;
     if (supervisor.useReasoning) {
       reasoningResult = await llmCircuitBreaker.call(
-        () => callReasoningLLM(message, history || []),
+        () => callReasoningLLM(contextualMessage, history || []),
         () => Promise.resolve(null)
       );
     }
@@ -767,7 +769,7 @@ router.post('/chat', async (req: Request, res: Response): Promise<void> => {
 
     // 推理模型不可用，降级到指令模型（glm-4-flash / deepseek-chat）
     const llmResult = await llmCircuitBreaker.call(
-      () => callLLM(message, history || []),
+      () => callLLM(contextualMessage, history || []),
       () => Promise.resolve(null)
     );
     if (llmResult) {

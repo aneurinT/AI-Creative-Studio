@@ -178,8 +178,8 @@ toolRegistry.register({
     { name: 'imageUrl', type: 'string', description: '图片URL或base64数据', required: true },
   ],
   handler: async (params, ctx) => {
-    const { removeBackground } = await import('./imageService.js');
-    const result = await removeBackground(params.imageUrl);
+    const { removeBg } = await import('./imageService.js');
+    const result = await removeBg({ imageUrl: params.imageUrl });
     return { success: result.success, data: result, summary: '背景移除完成' };
   },
   async: true,
@@ -216,7 +216,7 @@ toolRegistry.register({
   ],
   handler: async (params, ctx) => {
     const { modifyImage } = await import('./imageService.js');
-    const result = await modifyImage(params);
+    const result = await modifyImage(params as any);
     return { success: result.success, data: result, summary: `图片修改: ${params.modifyType || 'general'}` };
   },
   async: true,

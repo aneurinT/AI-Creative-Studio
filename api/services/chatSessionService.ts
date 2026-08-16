@@ -148,7 +148,7 @@ export function updateSession(id: string, updates: Partial<ChatSession>): Update
   try {
     const filePath = path.join(sessionsDir, `${id}.json`);
     if (!fs.existsSync(filePath)) {
-      return { success: false, session: { id, title: '', messages: [], createdAt: Date.now(), updatedAt: Date.now() } };
+      return { success: false, session: { id, userId: '', title: '', messages: [], createdAt: Date.now(), updatedAt: Date.now() } };
     }
 
     const data = fs.readFileSync(filePath, 'utf-8');
@@ -164,7 +164,7 @@ export function updateSession(id: string, updates: Partial<ChatSession>): Update
     return { success: true, session };
   } catch (error) {
     console.error('Error updating session:', error);
-    return { success: false, session: { id, title: '', messages: [], createdAt: Date.now(), updatedAt: Date.now() } };
+    return { success: false, session: { id, userId: '', title: '', messages: [], createdAt: Date.now(), updatedAt: Date.now() } };
   }
 }
 
@@ -174,7 +174,7 @@ export function addMessageToSession(id: string, message: ChatMessage): UpdateSes
   try {
     const filePath = path.join(sessionsDir, `${id}.json`);
     if (!fs.existsSync(filePath)) {
-      return { success: false, session: { id, title: '', messages: [], createdAt: Date.now(), updatedAt: Date.now() } };
+      return { success: false, session: { id, userId: '', title: '', messages: [], createdAt: Date.now(), updatedAt: Date.now() } };
     }
 
     const data = fs.readFileSync(filePath, 'utf-8');
@@ -194,7 +194,7 @@ export function addMessageToSession(id: string, message: ChatMessage): UpdateSes
     return { success: true, session };
   } catch (error) {
     console.error('Error adding message:', error);
-    return { success: false, session: { id, title: '', messages: [], createdAt: Date.now(), updatedAt: Date.now() } };
+    return { success: false, session: { id, userId: '', title: '', messages: [], createdAt: Date.now(), updatedAt: Date.now() } };
   }
 }
 

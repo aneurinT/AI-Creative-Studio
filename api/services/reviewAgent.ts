@@ -339,6 +339,7 @@ export async function reviewUserIntent(
     };
   }
 
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
     const systemPrompt = `你是审核 Agent（Review Agent）降级模式，负责检查 AI 助手对用户需求的理解是否准确。
 
@@ -386,7 +387,7 @@ export async function reviewUserIntent(
 
     // 添加超时控制（15秒），避免审核卡住整个流程
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    timeoutId = setTimeout(() => controller.abort(), 15000);
 
     try {
       const response = await fetch(ZHIPU_API_URL, {
@@ -457,12 +458,12 @@ export async function reviewUserIntent(
         status: correctedAction !== agentAction ? 'corrected' : 'failed',
       };
     } catch (error) {
-      clearTimeout(timeoutId);
+      if (timeoutId) clearTimeout(timeoutId);
       console.error('[ReviewAgent] Exception:', error);
       return { passed: true, confidence: 0.3, explanation: '审核异常', status: 'passed' };
     }
   } catch (error) {
-    clearTimeout(timeoutId);
+    if (timeoutId) clearTimeout(timeoutId);
     console.error('[ReviewAgent] Exception:', error);
     return { passed: true, confidence: 0.3, explanation: '审核异常', status: 'passed' };
   }

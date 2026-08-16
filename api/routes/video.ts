@@ -10,6 +10,9 @@ import fetch from 'node-fetch'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { createRequire } from 'module'
+
+const require = createRequire(import.meta.url)
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -2218,7 +2221,15 @@ router.post('/compare', async (req: Request, res: Response): Promise<void> => {
             const result = await createVideoTaskAsync(prompt, style || '', targetDuration, false);
             if (result.success && result.taskId) {
               const agnesTaskId = result.taskId;
+              let pollCount = 0;
+              const MAX_POLL = 400; // 400 * 3s = 20分钟超时
               const pollInterval = setInterval(() => {
+                pollCount++;
+                if (pollCount >= MAX_POLL) {
+                  clearInterval(pollInterval);
+                  setTaskProgress(engineTaskId, { progress: 0, status: 'failed', error: '轮询超时', taskType: 'compare-segment' });
+                  return;
+                }
                 const progress = getTaskProgress(agnesTaskId);
                 if (progress?.status === 'completed' && progress.videoUrl) {
                   clearInterval(pollInterval);
