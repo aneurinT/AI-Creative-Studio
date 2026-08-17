@@ -141,7 +141,7 @@ export class LtxBackend implements InferenceBackend {
     error?: string;
     message?: string;
   }> {
-    const { prompt, style = '', duration = '5', model = 'ltxv-2b-distilled', seed } = params;
+    const { prompt, style = '', duration = '10', model = 'ltxv-2b-distilled', seed } = params;
 
     // 验证时长（LTX-Video 适合短视频，限制在 maxDurationSec 以内）
     const targetDuration = parseInt(duration);

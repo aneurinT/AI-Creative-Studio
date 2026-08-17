@@ -14,7 +14,6 @@ import { addOperationLog } from './database.js';
 import { startSpan, endSpan, createTrace, finishTrace, setSpanRetryCount } from './tracing.js';
 import type { ActiveSpan } from './tracing.js';
 import { recordExperience, suggestOptimalAgent, suggestOptimalParams, queryExperience } from './globalExperiencePool.js';
-import { recommendEngine } from './engineCapabilityMatrix.js';
 
 // ===== 类型定义 =====
 
@@ -153,30 +152,18 @@ export async function analyzeParallelism(
     const parsed = JSON.parse(jsonMatch[0]);
 
     // 构建任务列表
-    const tasks: AgentTask[] = (parsed.tasks || []).map((t: any, i: number) => {
-      const params = t.params || {};
-      // 为视频任务添加引擎推荐
-      if (t.agentName === 'videoMaker' || t.action === 'video') {
-        const promptText = params.prompt || userMessage;
-        const engineRecs = recommendEngine(promptText, { duration: params.duration ? parseInt(String(params.duration)) : 10 });
-        if (engineRecs.length > 0) {
-          params.engineRecommendation = engineRecs[0];
-          params.allRecommendations = engineRecs.slice(0, 3);
-        }
-      }
-      return {
-        id: `task-${Date.now()}-${i}`,
-        agentName: t.agentName || 'hermes',
-        action: t.action || 'general',
-        params,
-        dependencies: t.dependencies || [],
-        canParallel: t.canParallel !== false,
-        retryCount: 0,
-        maxRetries: 3,
-        status: 'pending' as const,
-        retryHistory: [],
-      };
-    });
+    const tasks: AgentTask[] = (parsed.tasks || []).map((t: any, i: number) => ({
+      id: `task-${Date.now()}-${i}`,
+      agentName: t.agentName || 'hermes',
+      action: t.action || 'general',
+      params: t.params || {},
+      dependencies: t.dependencies || [],
+      canParallel: t.canParallel !== false,
+      retryCount: 0,
+      maxRetries: 3,
+      status: 'pending' as const,
+      retryHistory: [],
+    }));
 
     if (tasks.length === 0) {
       tasks.push(createDefaultTask(userMessage, context));
@@ -209,24 +196,15 @@ function createDefaultTask(userMessage: string, context: OrchestrationContext): 
   const lower = userMessage.toLowerCase();
   let action = 'general';
   let agentName = 'hermes';
-  const params: Record<string, any> = { prompt: userMessage };
 
-  if (lower.includes('视频') || lower.includes('video')) {
-    action = 'video';
-    agentName = 'videoMaker';
-    const engineRecs = recommendEngine(userMessage, { duration: 10 });
-    if (engineRecs.length > 0) {
-      params.engineRecommendation = engineRecs[0];
-      params.allRecommendations = engineRecs.slice(0, 3);
-    }
-  }
+  if (lower.includes('视频') || lower.includes('video')) { action = 'video'; agentName = 'videoMaker'; }
   else if (lower.includes('图片') || lower.includes('图像') || lower.includes('画')) { action = 'image'; agentName = 'imageCreator'; }
   else if (lower.includes('修改')) { action = lower.includes('视频') ? 'modify-video' : 'modify-image'; agentName = 'videoMaker'; }
 
   return {
     id: `task-${Date.now()}-0`,
     agentName, action,
-    params,
+    params: { prompt: userMessage },
     dependencies: [], canParallel: false,
     retryCount: 0, maxRetries: 3,
     status: 'pending', retryHistory: [],

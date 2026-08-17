@@ -7,7 +7,18 @@ import { checkQuota, recordUsage } from './quotaService.js';
 
 export type ImageModel = 'trae' | 'wanx' | 'cogview' | 'volcengine';
 
-export type ImageSize = '1024*1024' | '1024*1792' | '1792*1024' | 'landscape_16_9';
+export type ImageSize = '1024*1024' | '1024*1792' | '1792*1024' | 'landscape_16_9' | 'square_hd' | 'portrait_4_3' | 'landscape_4_3';
+
+/** 将 Trae 专用尺寸名转换为通用的 *x* 格式，供万相/CogView/火山引擎使用 */
+function normalizeSizeForNonTrae(size: string): string {
+  const map: Record<string, string> = {
+    'landscape_16_9': '1024*1024',
+    'square_hd': '1024*1024',
+    'portrait_4_3': '1024*1792',
+    'landscape_4_3': '1792*1024',
+  };
+  return map[size] || size;
+}
 
 export type VideoDuration = '5' | '10' | '15' | '18' | '30' | '36' | '45' | '60' | '75' | '90';
 
@@ -298,7 +309,7 @@ async function generateWithWanx(request: GenerateRequest): Promise<GenerateRespo
   }
 
   const fullPrompt = style ? `${prompt}，${style}` : prompt;
-  const sizeParam = size === 'landscape_16_9' ? '1024*1024' : size;
+  const sizeParam = normalizeSizeForNonTrae(size);
 
   console.log(`[Wanx] Creating task: prompt="${fullPrompt}", size="${sizeParam}"`);
 
@@ -382,7 +393,7 @@ async function generateWithCogView(request: GenerateRequest): Promise<GenerateRe
   }
 
   const fullPrompt = style ? `${prompt}，${style}` : prompt;
-  const sizeParam = size === 'landscape_16_9' ? '1024x1024' : size.replace('*', 'x');
+  const sizeParam = normalizeSizeForNonTrae(size).replace('*', 'x');
 
   try {
     const response = await fetch('https://open.bigmodel.cn/api/paas/v4/images/generations', {
@@ -436,7 +447,7 @@ async function generateWithVolcengine(request: GenerateRequest): Promise<Generat
   }
 
   const fullPrompt = style ? `${prompt}，${style}` : prompt;
-  const sizeParam = size === 'landscape_16_9' ? '1024*1024' : size;
+  const sizeParam = normalizeSizeForNonTrae(size);
 
   console.log(`[Volcengine] Creating task: prompt="${fullPrompt}", size="${sizeParam}", model="${modelId}"`);
 

@@ -26,6 +26,37 @@ const DURATIONS = [
 
 const RATE_LIMIT_SECONDS = 60;
 
+// 各引擎支持的分辨率
+const ENGINE_RESOLUTIONS: Record<string, { id: string; name: string }[]> = {
+  agnes: [
+    { id: '1080p', name: '1080p 全高清' },
+    { id: '720p', name: '720p 高清' },
+    { id: '480p', name: '480p 标清' },
+  ],
+  ltx: [
+    { id: '720p', name: '720p 高清' },
+    { id: '480p', name: '480p 标清' },
+  ],
+  cogvideox: [
+    { id: '1080p', name: '1080p 全高清' },
+  ],
+  'wanx-video': [
+    { id: '1080p', name: '1080p 全高清' },
+  ],
+  seedance: [
+    { id: '1080p', name: '1080p 全高清' },
+    { id: '720p', name: '720p 高清' },
+  ],
+};
+
+// 根据时长自动推荐分辨率
+function getAutoResolution(duration: string): string {
+  const d = parseInt(duration) || 10;
+  if (d <= 10) return '1080p';
+  if (d <= 18) return '720p';
+  return '480p';
+}
+
 interface VideoHistoryItem {
   id: string;
   prompt: string;
@@ -78,6 +109,7 @@ export default function VideoGenerator() {
   const [prompt, setPrompt] = useState('');
   const [selectedStyle, setSelectedStyle] = useState('realistic');
   const [selectedDuration, setSelectedDuration] = useState('10');
+  const [selectedResolution, setSelectedResolution] = useState('1080p');
   const [generatedVideo, setGeneratedVideo] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState('');
@@ -129,6 +161,22 @@ export default function VideoGenerator() {
   useEffect(() => {
     isGeneratingRef.current = isGenerating;
   }, [isGenerating]);
+
+  // 引擎切换时，如果当前分辨率不被支持，自动调整到该引擎支持的最高分辨率
+  useEffect(() => {
+    const supported = ENGINE_RESOLUTIONS[engine] || [];
+    if (supported.length > 0 && !supported.some(r => r.id === selectedResolution)) {
+      setSelectedResolution(supported[0].id);
+    }
+  }, [engine]);
+
+  // 时长变化时，如果用户没有手动选择分辨率，自动推荐
+  const [resolutionManuallySet, setResolutionManuallySet] = useState(false);
+  useEffect(() => {
+    if (!resolutionManuallySet) {
+      setSelectedResolution(getAutoResolution(selectedDuration));
+    }
+  }, [selectedDuration, resolutionManuallySet]);
 
   const fetchHistory = async () => {
     try {
@@ -351,7 +399,7 @@ export default function VideoGenerator() {
             // 直接用新的 scenes 继续
             const scenes = detectData.result.scenes.map((s: any) => ({ prompt: s.prompt?.trim() || '', description: s.description, duration: s.duration || 10 }));
             const apiUrl = '/api/video/storyboard';
-            const requestBody = { scenes, style: selectedStyle, ...(referenceImages.length > 0 && { imageUrl: referenceImages[0] }) };
+            const requestBody = { scenes, style: selectedStyle, resolution: selectedResolution, ...(referenceImages.length > 0 && { imageUrl: referenceImages[0] }) };
             const token = localStorage.getItem('auth_token');
             const hdrs: Record<string, string> = { 'Content-Type': 'application/json' };
             if (token) hdrs['Authorization'] = `Bearer ${token}`;
@@ -372,7 +420,7 @@ export default function VideoGenerator() {
           .map(s => ({ prompt: s.prompt.trim(), description: s.description, duration: s.duration }));
         if (scenes.length < 2) { setError('分镜头模式至少需要 2 个场景'); setIsGenerating(false); return; }
         const apiUrl = '/api/video/storyboard';
-        const requestBody = { scenes, style: selectedStyle, ...(referenceImages.length > 0 && { imageUrl: referenceImages[0] }) };
+        const requestBody = { scenes, style: selectedStyle, resolution: selectedResolution, ...(referenceImages.length > 0 && { imageUrl: referenceImages[0] }) };
         const token2 = localStorage.getItem('auth_token');
         const hdrs2: Record<string, string> = { 'Content-Type': 'application/json' };
         if (token2) hdrs2['Authorization'] = `Bearer ${token2}`;
@@ -391,17 +439,18 @@ export default function VideoGenerator() {
       
       let requestBody: any;
       if (isLtx) {
-        requestBody = { prompt: prompt.trim(), style: selectedStyle, duration: selectedDuration, model: ltxModel };
+        requestBody = { prompt: prompt.trim(), style: selectedStyle, duration: selectedDuration, model: ltxModel, resolution: selectedResolution };
       } else if (isFree) {
-        requestBody = { 
-          prompt: prompt.trim(), 
-          model: engine, 
-          duration: parseInt(selectedDuration) || 5, 
+        requestBody = {
+          prompt: prompt.trim(),
+          model: engine,
+          duration: parseInt(selectedDuration) || 5,
           style: selectedStyle,
+          resolution: selectedResolution,
           ...(referenceImages.length > 0 && { imageUrls: referenceImages }),
         };
       } else {
-        requestBody = { prompt: prompt.trim(), style: selectedStyle, duration: selectedDuration };
+        requestBody = { prompt: prompt.trim(), style: selectedStyle, duration: selectedDuration, resolution: selectedResolution };
       }
 
       const engineNames: Record<string, string> = { ltx: 'LTX local', cogvideox: 'CogVideoX-Flash(免费)', 'wanx-video': '万相视频(免费)', seedance: 'Seedance 2.0', agnes: 'Agnes API' };
@@ -1194,6 +1243,49 @@ export default function VideoGenerator() {
                 </div>
               </div>
 
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-gray-700">
+                  分辨率
+                  <span className="text-xs font-normal text-gray-400 ml-2">
+                    (时长 {selectedDuration}秒 推荐: {getAutoResolution(selectedDuration)})
+                  </span>
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {(ENGINE_RESOLUTIONS[engine] || []).map((res) => (
+                    <button
+                      key={res.id}
+                      onClick={() => { setSelectedResolution(res.id); setResolutionManuallySet(true); }}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${selectedResolution === res.id
+                        ? 'bg-green-500 text-white shadow-md'
+                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                        }`}
+                      title={res.id === getAutoResolution(selectedDuration) ? '推荐分辨率' : ''}
+                    >
+                      {res.name}
+                      {res.id === getAutoResolution(selectedDuration) && !resolutionManuallySet && (
+                        <span className="ml-1 text-xs">✓</span>
+                      )}
+                    </button>
+                  ))}
+                  {!resolutionManuallySet && (
+                    <button
+                      onClick={() => setResolutionManuallySet(true)}
+                      className="px-3 py-2 rounded-lg text-xs font-medium bg-gray-50 text-gray-400 hover:bg-gray-100 transition-all"
+                    >
+                      手动选择
+                    </button>
+                  )}
+                  {resolutionManuallySet && (
+                    <button
+                      onClick={() => { setResolutionManuallySet(false); setSelectedResolution(getAutoResolution(selectedDuration)); }}
+                      className="px-3 py-2 rounded-lg text-xs font-medium bg-gray-50 text-gray-400 hover:bg-gray-100 transition-all"
+                    >
+                      自动推荐
+                    </button>
+                  )}
+                </div>
+              </div>
+
               <button
                 onClick={handleGenerate}
                 disabled={isGenerating || !prompt.trim() || waitSeconds > 0}
@@ -1255,7 +1347,7 @@ export default function VideoGenerator() {
                 <div className="p-4 bg-gray-50 rounded-xl">
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-gray-500">视频描述</span>
-                    <span className="text-gray-400">时长: {selectedDuration}秒</span>
+                    <span className="text-gray-400">时长: {selectedDuration}秒 | 分辨率: {selectedResolution}</span>
                   </div>
                   <p className="text-gray-700 mt-1">{prompt}</p>
                 </div>

@@ -13,6 +13,7 @@ export interface InferenceTaskParams {
   duration?: string;
   model?: string;
   seed?: number;
+  resolution?: string;
   /** 图生视频条件参数 */
   conditioningMediaPaths?: string[];
   conditioningStrengths?: number[];

@@ -382,6 +382,7 @@ export async function createVideoTaskAsync(
   duration: string,
   split: boolean = true,
   userId?: string,
+  resolution?: string,
 ): Promise<VideoTaskResult> {
   const apiKey = process.env.AGNES_VIDEO_API_KEY
 
@@ -478,7 +479,10 @@ export async function createVideoTaskAsync(
   const fullPrompt = style ? `${prompt}，${style}` : prompt
   const frameConfig = DURATION_TO_FRAMES[duration || '10'] || DURATION_TO_FRAMES['10']
 
-  console.log(`[Agnes Video] Creating video: prompt="${fullPrompt}", duration="${duration}s", num_frames=${frameConfig.num_frames}, frame_rate=${frameConfig.frame_rate}, resolution=${frameConfig.resolution}`)
+  // 用户指定的分辨率覆盖基于时长的默认分辨率
+  const effectiveResolution = resolution || frameConfig.resolution
+
+  console.log(`[Agnes Video] Creating video: prompt="${fullPrompt}", duration="${duration}s", num_frames=${frameConfig.num_frames}, frame_rate=${frameConfig.frame_rate}, resolution=${effectiveResolution}`)
 
   let taskData: any
   let videoId: string | undefined
@@ -506,7 +510,7 @@ export async function createVideoTaskAsync(
               prompt: fullPrompt,
               num_frames: frameConfig.num_frames,
               frame_rate: frameConfig.frame_rate,
-              resolution: frameConfig.resolution,
+              resolution: effectiveResolution,
             }),
           },
         ),
@@ -1381,7 +1385,7 @@ async function pollFreeVideoFallback(
 
 router.post('/', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { prompt, style, duration, split = true } = req.body
+    const { prompt, style, duration, split = true, resolution } = req.body
 
     if (!prompt) {
       res.status(400).json({
@@ -1391,9 +1395,9 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
       return
     }
 
-    console.log(`Video generate request: prompt=${prompt}, style=${style}, duration=${duration}, split=${split}`)
+    console.log(`Video generate request: prompt=${prompt}, style=${style}, duration=${duration}, split=${split}, resolution=${resolution || 'auto'}`)
 
-    const result = await createVideoTaskAsync(prompt, style || '', duration || '10', split, (req as any).user?.userId)
+    const result = await createVideoTaskAsync(prompt, style || '', duration || '10', split, (req as any).user?.userId, resolution)
     res.json(result)
   } catch (error) {
     console.error('Video route error:', error)
@@ -1592,13 +1596,14 @@ router.post('/merge', async (req: Request, res: Response): Promise<void> => {
 
 router.post('/free', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { prompt, model, imageUrl, imageUrls, duration, style } = req.body as {
+    const { prompt, model, imageUrl, imageUrls, duration, style, resolution } = req.body as {
       prompt: string
       model: string
       imageUrl?: string
       imageUrls?: string[]
       duration?: number
       style?: string
+      resolution?: string
     }
 
     if (!prompt || !model) {
@@ -1612,7 +1617,7 @@ router.post('/free', async (req: Request, res: Response): Promise<void> => {
       return
     }
 
-    const totalDuration = parseInt(duration?.toString() || '5')
+    const totalDuration = parseInt(duration?.toString() || '10')
 
     // 统一拆分计算
     const { segmentCount, segDuration } = calculateSplit(totalDuration, model)
@@ -1631,7 +1636,7 @@ router.post('/free', async (req: Request, res: Response): Promise<void> => {
       // 后台执行：逐段生成 → 拼接
       if (model === 'seedance') {
         const lastSegDuration = totalDuration % segDuration || segDuration
-        pollSeedanceSplitTask(masterTaskId, prompt, style || '', totalDuration, segmentCount, segDuration, lastSegDuration, imageUrl || imageUrls?.[0])
+        pollSeedanceSplitTask(masterTaskId, prompt, style || '', totalDuration, segmentCount, segDuration, lastSegDuration, imageUrl || imageUrls?.[0], resolution)
       } else if (model === 'cogvideox') {
         tryZhipuSplitFallback(masterTaskId, prompt, style || '', segmentCount, segDuration, totalDuration)
       } else if (model === 'wanx-video') {
@@ -1643,7 +1648,7 @@ router.post('/free', async (req: Request, res: Response): Promise<void> => {
     // 单段任务
     const result = await createFreeVideoTask({
       model: model as 'cogvideox' | 'wanx-video' | 'seedance',
-      prompt, imageUrl, imageUrls, duration, style,
+      prompt, imageUrl, imageUrls, duration, style, resolution,
     });
 
     if (!result.success || !result.taskId) {
@@ -1656,7 +1661,7 @@ router.post('/free', async (req: Request, res: Response): Promise<void> => {
     setTaskProgress(taskId, { status: 'processing', progress: 5, message: '任务已提交' })
 
     // 后台轮询
-    pollFreeVideoTask(taskId, model as 'cogvideox' | 'wanx-video' | 'seedance', prompt, style || '', duration?.toString() || '5')
+    pollFreeVideoTask(taskId, model as 'cogvideox' | 'wanx-video' | 'seedance', prompt, style || '', duration?.toString() || '10')
 
     res.json({
       success: true,
@@ -1729,6 +1734,7 @@ async function pollSeedanceSplitTask(
   segMax: number,
   lastSegDuration: number,
   imageUrl?: string,
+  resolution?: string,
 ) {
   const segmentTaskIds: string[] = [];
   const segmentVideoPaths: string[] = [];
@@ -1761,6 +1767,7 @@ async function pollSeedanceSplitTask(
         prompt: segPrompt,
         duration: segDuration,
         style,
+        resolution,
         ...(imageUrl && i === 0 ? { imageUrl } : {}), // 仅首段带参考图
       });
 
@@ -1937,10 +1944,11 @@ async function downloadFreeVideo(url: string): Promise<Buffer> {
 
 router.post('/storyboard', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { scenes, style, imageUrl } = req.body as {
+    const { scenes, style, imageUrl, resolution } = req.body as {
       scenes: Array<{ prompt: string; duration?: number; description?: string }>
       style?: string
       imageUrl?: string
+      resolution?: string
     }
 
     if (!scenes || scenes.length === 0) {
@@ -1965,7 +1973,7 @@ router.post('/storyboard', async (req: Request, res: Response): Promise<void> =>
     });
 
     // 后台执行
-    pollStoryboardTask(masterTaskId, scenes, style || 'cinematic', DEFAULT_DUR, imageUrl);
+    pollStoryboardTask(masterTaskId, scenes, style || 'cinematic', DEFAULT_DUR, imageUrl, resolution);
   } catch (error) {
     res.status(500).json({ success: false, error: (error as Error).message });
   }
@@ -1977,6 +1985,7 @@ async function pollStoryboardTask(
   style: string,
   defaultDur: number,
   imageUrl?: string,
+  resolution?: string,
 ) {
   const segTaskIds: string[] = [];
   const segPaths: string[] = [];
@@ -1999,6 +2008,7 @@ async function pollStoryboardTask(
         prompt: `${scene.prompt}, ${style} style, cinematic quality`,
         duration: segDur,
         style,
+        ...(resolution ? { resolution } : {}),
         ...(imageUrl && i === 0 ? { imageUrl } : {}),
       });
 

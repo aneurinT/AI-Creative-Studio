@@ -18,17 +18,17 @@ export interface TaskProgress {
   progress: number;
   status: 'processing' | 'completed' | 'failed' | 'cancelled';
   videoUrl?: string;
+  /** 最终结果资源地址（与 videoUrl 并存，供部分接口直接返回） */
+  resultUrl?: string;
   error?: string;
+  /** 进度提示消息（如"正在生成剧情分镜..."），供 SSE/轮询接口透传给前端 */
+  message?: string;
   /** 任务类型，用于恢复时判断是否可重新查询第三方 API */
-  taskType: 'normal' | 'split' | 'merge' | 'compare' | 'compare-segment' | 'preview' | 'redraw' | 'storyboard';
+  taskType: 'normal' | 'split' | 'merge' | 'compare' | 'compare-segment' | 'preview' | 'redraw';
   /** 原始请求参数，便于过期后提示用户重新生成 */
   prompt?: string;
   style?: string;
   duration?: string;
-  /** 进度消息（分镜/拆分等阶段性描述） */
-  message?: string;
-  /** 结果 URL（分镜等复合任务的最终输出） */
-  resultUrl?: string;
   /** 创建时间戳，用于自动清理过期记录 */
   createdAt: number;
   /** 最后更新时间戳 */
@@ -127,7 +127,7 @@ export function getTaskProgress(taskId: string): TaskProgress | undefined {
 /** 设置/更新任务进度 */
 export function setTaskProgress(
   taskId: string,
-  progress: Partial<TaskProgress>,
+  progress: Partial<TaskProgress> & { taskType?: TaskProgress['taskType'] },
 ): void {
   const existing = taskCache[taskId];
 
@@ -136,13 +136,13 @@ export function setTaskProgress(
     progress: progress.progress ?? existing?.progress ?? 0,
     status: progress.status ?? existing?.status ?? 'processing',
     videoUrl: progress.videoUrl ?? existing?.videoUrl,
+    resultUrl: progress.resultUrl ?? existing?.resultUrl,
+    message: progress.message ?? existing?.message,
     error: progress.error ?? existing?.error,
     taskType: progress.taskType ?? existing?.taskType ?? 'normal',
     prompt: progress.prompt ?? existing?.prompt,
     style: progress.style ?? existing?.style,
     duration: progress.duration ?? existing?.duration,
-    message: progress.message ?? existing?.message,
-    resultUrl: progress.resultUrl ?? existing?.resultUrl,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };

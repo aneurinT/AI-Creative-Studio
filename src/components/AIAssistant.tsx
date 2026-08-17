@@ -621,6 +621,53 @@ export default function AIAssistant() {
     return 'realistic';
   }
 
+  function extractImageSize(text: string): string | undefined {
+    const lower = text.toLowerCase();
+
+    // 1:1 / 方形 / 头像
+    if (lower.includes('1:1') || lower.includes('方形') || lower.includes('头像') || lower.includes('方图')) {
+      return lower.includes('高清') ? 'square_hd' : '1024*1024';
+    }
+    // 9:16 / 竖屏 / 手机
+    if (lower.includes('9:16') || lower.includes('竖屏') || lower.includes('手机') || lower.includes('竖图')) {
+      return '1024*1792';
+    }
+    // 3:4 / 海报
+    if (lower.includes('3:4') || lower.includes('海报') || lower.includes('竖版')) {
+      return 'portrait_4_3';
+    }
+    // 4:3 / 横版
+    if (lower.includes('4:3') || lower.includes('横版') || lower.includes('横图4')) {
+      return 'landscape_4_3';
+    }
+    // 16:9 / 横屏 / 壁纸 / 桌面
+    if (lower.includes('16:9') || lower.includes('横屏') || lower.includes('壁纸') || lower.includes('桌面') || lower.includes('横图')) {
+      return lower.includes('高清') ? '1792*1024' : 'landscape_16_9';
+    }
+
+    return undefined;
+  }
+
+  function extractVideoResolution(text: string): string | undefined {
+    const lower = text.toLowerCase();
+
+    if (lower.includes('1080p') || lower.includes('全高清') || lower.includes('full hd') || lower.includes('fhd')) {
+      return '1080p';
+    }
+    if (lower.includes('720p') || lower.includes('高清') || lower.includes('hd')) {
+      return '720p';
+    }
+    if (lower.includes('480p') || lower.includes('标清') || lower.includes('sd')) {
+      return '480p';
+    }
+
+    // 根据用途推断：手机/竖屏 → 720p，大屏/演示 → 1080p
+    if (lower.includes('手机') || lower.includes('竖屏')) return '720p';
+    if (lower.includes('大屏') || lower.includes('演示') || lower.includes('展示') || lower.includes('投影')) return '1080p';
+
+    return undefined;
+  }
+
   /**
    * 格式化 AI 助手的回复内容，使其更自然、更有温度
    * 避免生硬的"正在处理..."，而是加入上下文理解和思考过程
@@ -718,6 +765,8 @@ export default function AIAssistant() {
 
     const duration = action === 'video' ? extractDuration(text) : undefined;
     const style = extractStyle(text);
+    const size = action === 'image' || action === 'compose' ? extractImageSize(text) : undefined;
+    const resolution = action === 'video' || action === 'compose' ? extractVideoResolution(text) : undefined;
 
     return {
       action,
@@ -725,6 +774,8 @@ export default function AIAssistant() {
         prompt: text,
         style,
         duration,
+        size,
+        resolution,
       },
     };
   }
@@ -915,10 +966,20 @@ export default function AIAssistant() {
     }
   }
 
-  async function callStoryWriter(message: string, imageUrls?: string[]): Promise<{ success: boolean; script?: string; thoughts?: AgentThought[]; sessionId?: string; reasoning?: string; modelUsed?: string }> {
+  // Agent 接口调用超时（秒）：后端含视觉预处理 + 本地/推理模型多级调用，耗时较长
+  const STORY_WRITE_TIMEOUT = 90 * 1000;
+  const VIDEO_ANALYZE_TIMEOUT = 90 * 1000;
+  const IMAGE_ANALYZE_TIMEOUT = 60 * 1000;
+
+  async function callStoryWriter(message: string, imageUrls?: string[], externalSignal?: AbortSignal): Promise<{ success: boolean; script?: string; thoughts?: AgentThought[]; sessionId?: string; reasoning?: string; modelUsed?: string; timeout?: boolean }> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), STORY_WRITE_TIMEOUT);
+    let onExternalAbort: (() => void) | undefined;
+    if (externalSignal) {
+      onExternalAbort = () => controller.abort();
+      externalSignal.addEventListener('abort', onExternalAbort);
+    }
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 30000);
       const response = await fetch('/api/agents/story/write', {
         method: 'POST',
         headers: authHeaders(),
@@ -929,7 +990,6 @@ export default function AIAssistant() {
         }),
         signal: controller.signal,
       });
-      clearTimeout(timeout);
       const data = await response.json();
       return {
         success: data.success,
@@ -940,15 +1000,33 @@ export default function AIAssistant() {
         modelUsed: data.modelUsed || 'instruction',
       };
     } catch (error) {
+      if ((error as Error).name === 'AbortError') {
+        if (externalSignal?.aborted) {
+          console.warn('[Story] 故事创作被用户终止');
+          return { success: false };
+        }
+        console.warn(`[Story] 故事创作超时（${STORY_WRITE_TIMEOUT / 1000}s），降级为直接生成`);
+        return { success: false, timeout: true };
+      }
       console.error('Story writer error:', error);
       return { success: false };
+    } finally {
+      clearTimeout(timeout);
+      if (onExternalAbort && externalSignal) {
+        externalSignal.removeEventListener('abort', onExternalAbort);
+      }
     }
   }
 
-  async function callVideoAnalyzer(script: string, sessionId?: string, originalMessage?: string, imageUrls?: string[]): Promise<{ success: boolean; result?: Record<string, any>; thoughts?: AgentThought[]; reasoning?: string; modelUsed?: string }> {
+  async function callVideoAnalyzer(script: string, sessionId?: string, originalMessage?: string, imageUrls?: string[], externalSignal?: AbortSignal): Promise<{ success: boolean; result?: Record<string, any>; thoughts?: AgentThought[]; reasoning?: string; modelUsed?: string; timeout?: boolean }> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), VIDEO_ANALYZE_TIMEOUT);
+    let onExternalAbort: (() => void) | undefined;
+    if (externalSignal) {
+      onExternalAbort = () => controller.abort();
+      externalSignal.addEventListener('abort', onExternalAbort);
+    }
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 30000);
       const response = await fetch('/api/agents/video/analyze', {
         method: 'POST',
         headers: authHeaders(),
@@ -961,7 +1039,6 @@ export default function AIAssistant() {
         }),
         signal: controller.signal,
       });
-      clearTimeout(timeout);
       const data = await response.json();
       return {
         success: data.success,
@@ -971,15 +1048,33 @@ export default function AIAssistant() {
         modelUsed: data.modelUsed || 'instruction',
       };
     } catch (error) {
+      if ((error as Error).name === 'AbortError') {
+        if (externalSignal?.aborted) {
+          console.warn('[Video] 视频参数分析被用户终止');
+          return { success: false };
+        }
+        console.warn(`[Video] 视频参数分析超时（${VIDEO_ANALYZE_TIMEOUT / 1000}s），降级为默认参数生成`);
+        return { success: false, timeout: true };
+      }
       console.error('Video analyzer error:', error);
       return { success: false };
+    } finally {
+      clearTimeout(timeout);
+      if (onExternalAbort && externalSignal) {
+        externalSignal.removeEventListener('abort', onExternalAbort);
+      }
     }
   }
 
-  async function callImageAnalyzer(message: string, imageUrls?: string[]): Promise<{ success: boolean; result?: Record<string, any>; thoughts?: AgentThought[]; reasoning?: string; modelUsed?: string }> {
+  async function callImageAnalyzer(message: string, imageUrls?: string[], externalSignal?: AbortSignal): Promise<{ success: boolean; result?: Record<string, any>; thoughts?: AgentThought[]; reasoning?: string; modelUsed?: string; timeout?: boolean }> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), IMAGE_ANALYZE_TIMEOUT);
+    let onExternalAbort: (() => void) | undefined;
+    if (externalSignal) {
+      onExternalAbort = () => controller.abort();
+      externalSignal.addEventListener('abort', onExternalAbort);
+    }
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 20000);
       const response = await fetch('/api/agents/image/analyze', {
         method: 'POST',
         headers: authHeaders(),
@@ -990,7 +1085,6 @@ export default function AIAssistant() {
         }),
         signal: controller.signal,
       });
-      clearTimeout(timeout);
       const data = await response.json();
       return {
         success: data.success,
@@ -1000,8 +1094,21 @@ export default function AIAssistant() {
         modelUsed: data.modelUsed || 'instruction',
       };
     } catch (error) {
+      if ((error as Error).name === 'AbortError') {
+        if (externalSignal?.aborted) {
+          console.warn('[Image] 图像参数分析被用户终止');
+          return { success: false };
+        }
+        console.warn(`[Image] 图像参数分析超时（${IMAGE_ANALYZE_TIMEOUT / 1000}s），降级为默认参数生成`);
+        return { success: false, timeout: true };
+      }
       console.error('Image analyzer error:', error);
       return { success: false };
+    } finally {
+      clearTimeout(timeout);
+      if (onExternalAbort && externalSignal) {
+        externalSignal.removeEventListener('abort', onExternalAbort);
+      }
     }
   }
 
@@ -1034,6 +1141,7 @@ export default function AIAssistant() {
           body: JSON.stringify({
             prompt: params.prompt,
             style: params.style || 'realistic',
+            size: params.size || undefined,
           }),
           signal: controller.signal,
         });
@@ -1057,12 +1165,13 @@ export default function AIAssistant() {
             if (m.id === loadingId) {
               return {
                 ...m,
-                content: '✅ 图片生成成功！你可以继续修改这张图片。',
+                content: `✅ 图片生成成功！${params.size ? `（尺寸 ${params.size}）` : ''}你可以继续修改这张图片。`,
                 isGenerating: false,
                 generatedImage: data.imageUrl,
                 originalPrompt: params.prompt,
                 modifyHistory: [],
-                params: { prompt: params.prompt, style: params.style || 'realistic' },
+                actionType: 'image',
+                params: { prompt: params.prompt, style: params.style || 'realistic', size: params.size || undefined },
               };
             }
             if (m.isGenerating && m.id !== loadingId) {
@@ -1576,6 +1685,7 @@ export default function AIAssistant() {
             prompt: params.prompt,
             style: params.style || 'realistic',
             duration: params.duration || '10',
+            resolution: params.resolution || undefined,
             sceneBreakdown: params.sceneBreakdown || undefined, // 传递分镜数据
             referenceImage: params.referenceImage || undefined, // 多模态：参考图片
           }),
@@ -1591,6 +1701,15 @@ export default function AIAssistant() {
         }
 
         if (data.success && data.taskId) {
+          // 如果后端返回了拆分/拼接提示，更新 loading 消息
+          if (data.message) {
+            setMessages(prev => prev.map(m => {
+              if (m.id === loadingId) {
+                return { ...m, content: `📹 ${data.message}` };
+              }
+              return m;
+            }));
+          }
           await pollVideoStatus(data.taskId, loadingId, params, controller);
           return;
         } else {
@@ -1808,12 +1927,13 @@ export default function AIAssistant() {
               if (m.id === loadingId) {
                 return {
                   ...m,
-                  content: isSplitVideo ? '✅ 视频片段拼接完成！审核 Agent 已确认质量合格。' : '✅ 视频生成成功！审核 Agent 已确认质量合格。',
+                  content: `${isSplitVideo ? '✅ 视频片段拼接完成！' : '✅ 视频生成成功！'}${params.resolution ? `（分辨率 ${params.resolution}）` : ''}审核 Agent 已确认质量合格。`,
                   isGenerating: false,
                   generatedVideo: finalVideoUrl,
                   originalPrompt: params.prompt,
                   modifyHistory: [],
-                  params: { prompt: params.prompt, style: params.style || 'realistic', duration: params.duration || '10' },
+                  actionType: 'video',
+                  params: { prompt: params.prompt, style: params.style || 'realistic', duration: params.duration || '10', resolution: params.resolution || undefined },
                 };
               }
               // 清理所有其他残留的 isGenerating 消息（脚本创作、分析等中间步骤）
@@ -2423,9 +2543,8 @@ export default function AIAssistant() {
       const hermesResult = hasImages
         ? await callHermesWithImage(sendText, imageUrls!, agentAbortController.signal)
         : await callHermesAgent(sendText, messages, agentAbortController.signal);
-      // Agent 思考完成，移除 controller 和思考动画
+      // Agent 思考完成，移除思考动画（controller 在 finally 中统一清理）
       clearInterval(thinkingTimer);
-      activeTasksRef.current.delete(agentTaskId);
 
       // 推理模型返回了真实思考过程 → 替换 thinking 消息为简短的模型标识
       // 真正的分析结果在后面的 assistantMessage 中展示
@@ -2536,6 +2655,7 @@ export default function AIAssistant() {
           generateImageAction({
             prompt: actionResult.params?.prompt || sendText,
             style: actionResult.params?.style,
+            size: actionResult.params?.size,
           }).catch(err => {
             console.error('[Compose] Image generation failed:', err);
           });
@@ -2564,8 +2684,18 @@ export default function AIAssistant() {
             }));
           }, 800);
 
-          const storyResult = await callStoryWriter(sendText, imageUrls);
+          const storyResult = await callStoryWriter(sendText, imageUrls, agentAbortController.signal);
           clearInterval(storyThoughtTimer);
+          if (agentAbortController.signal.aborted) return;
+
+          if (storyResult.timeout) {
+            setMessages(prev => prev.map(m => {
+              if (m.id === loadingId) {
+                return { ...m, content: '⏱ 故事创作耗时较长，已切换为直接生成视频...' };
+              }
+              return m;
+            }));
+          }
 
           // 🔍 审核 Agent：实时审核脚本质量
           let scriptReviewBadge = '';
@@ -2630,21 +2760,32 @@ export default function AIAssistant() {
               }));
             }, 800);
 
-            const analyzeResult = await callVideoAnalyzer(storyResult.script, storyResult.sessionId, sendText, imageUrls);
+            const analyzeResult = await callVideoAnalyzer(storyResult.script, storyResult.sessionId, sendText, imageUrls, agentAbortController.signal);
             clearInterval(analyzerThoughtTimer);
+            if (agentAbortController.signal.aborted) return;
+
+            if (analyzeResult.timeout) {
+              setMessages(prev => prev.map(m => {
+                if (m.id === analyzerLoadingId) {
+                  return { ...m, content: '⏱ 视频参数分析耗时较长，已切换为默认参数生成...' };
+                }
+                return m;
+              }));
+            }
 
             if (analyzeResult.success && analyzeResult.result) {
               const allThoughts = [...(storyResult.thoughts || []), ...(analyzeResult.thoughts || [])];
               const userDuration = extractDuration(sendText);
-              const mergedResult = { ...analyzeResult.result };
+              // 以 agent 判断的意图参数为基础，分析结果覆盖具体内容（保留 agent 选择的分辨率/尺寸）
+              const mergedResult = { ...actionResult.params, ...analyzeResult.result };
               if (userDuration !== '10' || sendText.match(/\d+\s*(秒|分钟|minute|min)/)) {
                 mergedResult.duration = userDuration;
               }
 
               // 构建分析结果展示（完整展示分镜信息和 prompt）
               const resultPreview = mergedResult.sceneBreakdown && mergedResult.sceneBreakdown.length > 0
-                ? `🎬 **视频分析完成！**\n\n📋 **分镜脚本（${mergedResult.sceneBreakdown.length} 个镜头，${mergedResult.duration}秒）**：\n${mergedResult.sceneBreakdown.map((s: any) => `  ${s.scene}. ${s.description || s.prompt}（${s.duration}秒）`).join('\n')}\n\n🎨 风格：${mergedResult.style || 'auto'}\n📝 Prompt：${mergedResult.prompt || ''}`
-                : `🎬 **视频分析完成！**\n\n🎨 风格：${mergedResult.style || 'auto'}\n⏱ 时长：${mergedResult.duration || '10'}秒\n📝 Prompt：${mergedResult.prompt || ''}`;
+                ? `🎬 **视频分析完成！**\n\n📋 **分镜脚本（${mergedResult.sceneBreakdown.length} 个镜头，${mergedResult.duration}秒）**：\n${mergedResult.sceneBreakdown.map((s: any) => `  ${s.scene}. ${s.description || s.prompt}（${s.duration}秒）`).join('\n')}\n\n🎨 风格：${mergedResult.style || 'auto'}\n⏱ 分辨率：${mergedResult.resolution || '自动'}\n📝 Prompt：${mergedResult.prompt || ''}`
+                : `🎬 **视频分析完成！**\n\n🎨 风格：${mergedResult.style || 'auto'}\n⏱ 时长：${mergedResult.duration || '10'}秒\n⏱ 分辨率：${mergedResult.resolution || '自动'}\n📝 Prompt：${mergedResult.prompt || ''}`;
 
               setMessages(prev => prev.map(m => {
                 if (m.id === analyzerLoadingId) {
@@ -2696,8 +2837,18 @@ export default function AIAssistant() {
             }));
           }, 800);
 
-          const analyzeResult = await callImageAnalyzer(sendText, imageUrls);
+          const analyzeResult = await callImageAnalyzer(sendText, imageUrls, agentAbortController.signal);
           clearInterval(imgThoughtTimer);
+          if (agentAbortController.signal.aborted) return;
+
+          if (analyzeResult.timeout) {
+            setMessages(prev => prev.map(m => {
+              if (m.id === loadingId) {
+                return { ...m, content: '⏱ 图像需求分析耗时较长，已切换为默认参数生成...' };
+              }
+              return m;
+            }));
+          }
 
           if (analyzeResult.success && analyzeResult.result) {
             setMessages(prev => prev.map(m => {
@@ -2711,7 +2862,8 @@ export default function AIAssistant() {
               }
               return m;
             }));
-            await generateImageAction(analyzeResult.result);
+            // 以 agent 判断的意图参数为基础，分析结果覆盖具体内容（保留 agent 选择的尺寸）
+            await generateImageAction({ ...actionResult.params, ...analyzeResult.result });
           } else {
             await generateImageAction(actionResult.params);
           }
@@ -2826,6 +2978,7 @@ export default function AIAssistant() {
       }]);
     } finally {
       clearInterval(thinkingTimer);
+      activeTasksRef.current.delete(agentTaskId);
       setMessages(prev => prev.filter(m => m.id !== thinkingId));
       setIsTyping(false);
       // 当前任务完成，自动消费队列中的下一个消息
@@ -2914,6 +3067,8 @@ export default function AIAssistant() {
               isGenerating: false,
               originalPrompt: data.description || '根据图片生成视频',
               modifyHistory: [],
+              actionType: 'video',
+              params: { prompt: data.description || '根据图片生成视频', style: 'realistic', duration: '10' },
             };
           }
           return m;

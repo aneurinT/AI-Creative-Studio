@@ -96,6 +96,10 @@ export default function Home() {
                 { id: 'landscape_16_9', name: '横图 16:9' },
                 { id: '1024*1024', name: '方图 1:1' },
                 { id: '1024*1792', name: '竖图 9:16' },
+                { id: '1792*1024', name: '横图 16:9 高清' },
+                { id: 'square_hd', name: '方图高清' },
+                { id: 'portrait_4_3', name: '竖图 4:3' },
+                { id: 'landscape_4_3', name: '横图 4:3' },
               ].map((size) => (
                 <button
                   key={size.id}

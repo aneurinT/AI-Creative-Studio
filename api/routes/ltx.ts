@@ -52,7 +52,7 @@ router.get('/models', async (req: Request, res: Response): Promise<void> => {
 // 提交视频生成任务（走默认推理后端，便于未来切换为 SVD 等）
 router.post('/generate', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { prompt, style, duration, model, seed } = req.body
+    const { prompt, style, duration, model, seed, resolution } = req.body
 
     if (!prompt) {
       res.status(400).json({
@@ -62,14 +62,15 @@ router.post('/generate', async (req: Request, res: Response): Promise<void> => {
       return
     }
 
-    console.log(`[LTX Route] Generate request: prompt="${String(prompt).substring(0, 50)}", duration=${duration}, model=${model}`)
+    console.log(`[LTX Route] Generate request: prompt="${String(prompt).substring(0, 50)}", duration=${duration}, model=${model}, resolution=${resolution || 'auto'}`)
 
     const params: InferenceTaskParams = {
       prompt,
       style: style || '',
-      duration: duration || '5',
+      duration: duration || '10',
       model: model || 'ltxv-2b-distilled',
       seed,
+      resolution,
     }
 
     const result = await inferenceRegistry.getDefault().startTask(params)

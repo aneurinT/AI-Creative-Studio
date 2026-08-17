@@ -171,7 +171,7 @@ export async function generateWanxVideo(params: {
         prompt: params.prompt,
       },
       parameters: {
-        duration: params.duration || 5,
+        duration: params.duration || 10,
         n: 1,
       },
     };
@@ -285,6 +285,7 @@ export async function createFreeVideoTask(params: {
   imageUrls?: string[];
   duration?: number;
   style?: string;
+  resolution?: string;
 }): Promise<{ success: boolean; taskId?: string; error?: string }> {
   // 配额检查
   const quotaMap: Record<string, string> = {
@@ -315,7 +316,7 @@ export async function createFreeVideoTask(params: {
     } else if (params.model === 'wanx-video') {
       result = await generateWanxVideo({
         prompt: params.prompt,
-        duration: params.duration || 5,
+        duration: params.duration || 10,
         style: params.style,
       })
     } else if (params.model === 'seedance') {
@@ -345,6 +346,7 @@ export async function generateSeedanceVideo(params: {
   imageUrl?: string;
   imageUrls?: string[];
   duration?: number;
+  resolution?: string;
 }): Promise<{ success: boolean; taskId?: string; error?: string }> {
   const apiKey = getVideoApiKey('seedance') || process.env.SEEDANCE_API_KEY;
   if (!apiKey) {
@@ -365,9 +367,9 @@ export async function generateSeedanceVideo(params: {
 
     const body: Record<string, any> = {
       model: SEEDANCE_MODEL,
-      resolution: '1080p',
+      resolution: params.resolution || '1080p',
       ratio: '16:9',
-      duration: Math.min(Math.max(params.duration || 5, 5), 15), // 支持 5/10/15 秒
+      duration: Math.min(Math.max(params.duration || 10, 5), 15), // 支持 5/10/15 秒
       watermark: false,
     };
 

@@ -33,11 +33,16 @@ const SHARED_INTENT_PROMPT = `你是AI创意工坊意图识别器。检查对话
 - modify-image/modify-video:修改已有作品(历史中有关联时，用户未说"新"则默认modify)
 - remove-bg:抠图 | compose-image:合成拼接 | general:非创作问答
 
-上下文关联规则：历史assistant消息含[上一轮任务]标注。"长一点/短一点/变成15秒"→modify-video提取原prompt。"改风格/调整"→modify-*。"再生成"→modify-*。无关联→全新创作。
+上下文关联规则：历史assistant消息含[上一轮任务]标注，且若含"已有视频:是"或"已有图片:是"说明用户已有生成结果。只要用户提到"做长点/长一点/短一点/变成XX秒/改风格/调整/再生成/改一下/换个风格"，且历史中有对应作品→必须返回modify-video/modify-image并关联原prompt。无关联→全新创作。
 
 参数：prompt(英文80-200词) style(realistic/cinematic/anime/3d/illustration) duration(默认10) split(>18秒true) modifyInstruction(修改要求原文) contextFromPrevious(关联信息)
 
-输出严格JSON：{"action":"video","params":{"prompt":"...","style":"cinematic","duration":10,"split":false},"response":"友好中文回复"}`;
+分辨率判断（agent自动决定最优方案）：
+- 图片size：头像/1:1→"1024*1024"，竖屏/手机壁纸/9:16→"1024*1792"，横屏/壁纸/16:9→"landscape_16_9"，海报/3:4→"portrait_4_3"，横图/4:3→"landscape_4_3"
+- 视频resolution：5-10秒→"1080p"，15-18秒→"720p"，30秒+→"480p"，用户要求高清→"1080p"
+
+输出严格JSON：{"action":"video","params":{"prompt":"...","style":"cinematic","duration":10,"split":false,"resolution":"1080p"},"response":"友好中文回复"}
+或图片：{"action":"image","params":{"prompt":"...","style":"realistic","size":"landscape_16_9"},"response":"友好中文回复"}`;
 
 /** 异步检查 Hermes 是否可用（缓存结果 5 分钟） */
 async function checkHermesInstalled(): Promise<boolean> {
@@ -108,6 +113,10 @@ async function tryCallReasoningLLM(
               if (m.params?.prompt) ctxParts.push(`原始描述: ${m.params.prompt}`);
               if (m.params?.style) ctxParts.push(`风格: ${m.params.style}`);
               if (m.params?.duration) ctxParts.push(`时长: ${m.params.duration}秒`);
+              if (m.params?.size) ctxParts.push(`尺寸: ${m.params.size}`);
+              if (m.params?.resolution) ctxParts.push(`分辨率: ${m.params.resolution}`);
+              if (m.generatedVideo) ctxParts.push('已有视频: 是');
+              if (m.generatedImage) ctxParts.push('已有图片: 是');
               content = `${ctxParts.join(' | ')}\n${content}`;
             }
             return { role: m.role === 'user' ? 'user' : 'assistant', content };
@@ -223,6 +232,10 @@ async function tryCallLLM(
               if (m.params?.prompt) ctxParts.push(`原始描述: ${m.params.prompt}`);
               if (m.params?.style) ctxParts.push(`风格: ${m.params.style}`);
               if (m.params?.duration) ctxParts.push(`时长: ${m.params.duration}秒`);
+              if (m.params?.size) ctxParts.push(`尺寸: ${m.params.size}`);
+              if (m.params?.resolution) ctxParts.push(`分辨率: ${m.params.resolution}`);
+              if (m.generatedVideo) ctxParts.push('已有视频: 是');
+              if (m.generatedImage) ctxParts.push('已有图片: 是');
               content = `${ctxParts.join(' | ')}\n${content}`;
             }
             return { role: m.role === 'user' ? 'user' : 'assistant', content };
@@ -286,6 +299,10 @@ async function callLocalLLM(message: string, history: any[]): Promise<{ action: 
         if (m.params?.prompt) ctxParts.push(`原始描述: ${m.params.prompt}`);
         if (m.params?.style) ctxParts.push(`风格: ${m.params.style}`);
         if (m.params?.duration) ctxParts.push(`时长: ${m.params.duration}秒`);
+        if (m.params?.size) ctxParts.push(`尺寸: ${m.params.size}`);
+        if (m.params?.resolution) ctxParts.push(`分辨率: ${m.params.resolution}`);
+        if (m.generatedVideo) ctxParts.push('已有视频: 是');
+        if (m.generatedImage) ctxParts.push('已有图片: 是');
         content = `${ctxParts.join(' | ')}\n${content}`;
       }
       return { role: (m.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant', content };
@@ -441,6 +458,7 @@ function parseHermesAction(output: string, originalMessage: string): { action: s
         if (value.style || value.Style) params.style = value.style || value.Style;
         if (value.duration || value.Duration) params.duration = value.duration || value.Duration;
         if (value.size || value.Size) params.size = value.size || value.Size;
+        if (value.resolution || value.Resolution) params.resolution = value.resolution || value.Resolution;
 
         return { action: mappedAction, params, response: parsed.response || parsed.Response || '' };
       }
@@ -472,6 +490,7 @@ function parseHermesAction(output: string, originalMessage: string): { action: s
     if (kvMap.style) params.style = kvMap.style;
     if (kvMap.duration) params.duration = kvMap.duration;
     if (kvMap.size) params.size = kvMap.size;
+    if (kvMap.resolution) params.resolution = kvMap.resolution;
 
     return { action: mappedAction, params };
   }
@@ -479,7 +498,7 @@ function parseHermesAction(output: string, originalMessage: string): { action: s
   // 尝试 3: 从响应文本中推断
   const responseLower = output.toLowerCase();
   if (responseLower.includes('视频') || responseLower.includes('video')) {
-    return { action: 'video', params: { prompt: originalMessage, duration: '5' } };
+    return { action: 'video', params: { prompt: originalMessage, duration: '10' } };
   }
 
   // 回退
@@ -916,6 +935,10 @@ router.post('/chat/stream', async (req: Request, res: Response): Promise<void> =
           if (m.params?.prompt) ctxParts.push(`原始描述: ${m.params.prompt}`);
           if (m.params?.style) ctxParts.push(`风格: ${m.params.style}`);
           if (m.params?.duration) ctxParts.push(`时长: ${m.params.duration}秒`);
+          if (m.params?.size) ctxParts.push(`尺寸: ${m.params.size}`);
+          if (m.params?.resolution) ctxParts.push(`分辨率: ${m.params.resolution}`);
+          if (m.generatedVideo) ctxParts.push('已有视频: 是');
+          if (m.generatedImage) ctxParts.push('已有图片: 是');
           content = `${ctxParts.join(' | ')}\n${content}`;
         }
         return { role: m.role, content };
