@@ -524,15 +524,26 @@ export async function createVideoTaskAsync(
         console.error(`[Agnes Video] Create failed (attempt ${attempts}): HTTP ${createResponse.status} - ${JSON.stringify(errorData)}`)
 
         const errorMsg = errorData.message || errorData.error?.message || `Agnes Video创建任务失败: ${createResponse.status}`
+        const errorLower = errorMsg.toLowerCase()
 
-        if (errorMsg.toLowerCase().includes('rate limit') && attempts < RATE_LIMIT_RETRY_MAX) {
-          console.log(`[Agnes Video] Rate limit exceeded, waiting 60 seconds (attempt ${attempts}/${RATE_LIMIT_RETRY_MAX})`)
-          await new Promise(resolve => setTimeout(resolve, 60000))
-          continue
+        // 处理限流 / 队列满：等待后重试
+        if (attempts < RATE_LIMIT_RETRY_MAX) {
+          if (errorLower.includes('rate limit')) {
+            console.log(`[Agnes Video] Rate limit exceeded, waiting 60 seconds (attempt ${attempts}/${RATE_LIMIT_RETRY_MAX})`)
+            await new Promise(resolve => setTimeout(resolve, 60000))
+            continue
+          }
+          if (errorLower.includes('queue') || errorLower.includes('retry later') || createResponse.status === 429) {
+            console.log(`[Agnes Video] Queue full, retrying in 35 seconds (attempt ${attempts}/${RATE_LIMIT_RETRY_MAX})`)
+            await new Promise(resolve => setTimeout(resolve, 35000))
+            continue
+          }
         }
 
+        // Agnes 创建失败（重试耗尽），释放限流槽位并自动降级到免费引擎
         releaseRateLimitSlot(rateLimit.slotId)
-        return { success: false, error: errorMsg }
+        console.log(`[Agnes Video] Create failed after ${attempts} attempts (${errorMsg}), auto-fallback to free engines`)
+        return await tryFreeVideoFallback(prompt, style, duration)
       }
 
       taskData = await createResponse.json()
@@ -546,8 +557,10 @@ export async function createVideoTaskAsync(
           await new Promise(resolve => setTimeout(resolve, 5000))
           continue
         }
+        // Agnes 未返回任务 ID（重试耗尽），自动降级到免费引擎
         releaseRateLimitSlot(rateLimit.slotId)
-        return { success: false, error: 'Agnes Video未返回任务ID' }
+        console.log(`[Agnes Video] No video ID after ${attempts} attempts, auto-fallback to free engines`)
+        return await tryFreeVideoFallback(prompt, style, duration)
       }
 
       break
@@ -564,8 +577,10 @@ export async function createVideoTaskAsync(
       console.error(`[Agnes Video] Exception (attempt ${attempts}): ${error}`)
 
       if (attempts >= RATE_LIMIT_RETRY_MAX) {
+        // Agnes 异常（重试耗尽），释放限流槽位并自动降级到免费引擎
         releaseRateLimitSlot(rateLimit.slotId)
-        return { success: false, error: errorMsg }
+        console.log(`[Agnes Video] Exception after ${attempts} attempts, auto-fallback to free engines`)
+        return await tryFreeVideoFallback(prompt, style, duration)
       }
     }
   } while (attempts < RATE_LIMIT_RETRY_MAX)
